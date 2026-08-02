@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ProjectAssetsFile>$(MSBuildThisFileDirectory).assets/project.assets.json</ProjectAssetsFile>
+  </PropertyGroup>
+</Project>

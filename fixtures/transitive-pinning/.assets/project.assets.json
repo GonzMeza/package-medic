@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "targets": { "net8.0": { "xunit/2.9.2": {}, "xunit.assert/2.9.2": {} } },
+  "libraries": { "xunit/2.9.2": { "type": "package" }, "xunit.assert/2.9.2": { "type": "package" } },
+  "project": { "frameworks": { "net8.0": { "dependencies": { "xunit": { "target": "Package", "version": "[2.9.2, )" } } } } },
+  "logs": []
+}

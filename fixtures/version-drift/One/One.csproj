@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ProjectAssetsFile>$(MSBuildThisFileDirectory).assets/project.assets.json</ProjectAssetsFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="xunit" Version="2.6.2" />
+  </ItemGroup>
+</Project>

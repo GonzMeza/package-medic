@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "targets": { "net8.0": {} },
+  "libraries": {},
+  "project": { "frameworks": { "net8.0": { "dependencies": {} } } },
+  "logs": []
+}

@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>PackageMedic.Core</AssemblyName>
+    <RootNamespace>PackageMedic.Core</RootNamespace>
+    <Description>Dependency analysis engine for PackageMedic.</Description>
+  </PropertyGroup>
+</Project>
