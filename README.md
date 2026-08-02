@@ -1,5 +1,11 @@
 # PackageMedic
 
+[![NuGet](https://img.shields.io/nuget/vpre/PackageMedic.Tool.svg)](https://www.nuget.org/packages/PackageMedic.Tool)
+[![NuGet Downloads](https://img.shields.io/nuget/dt/PackageMedic.Tool.svg)](https://www.nuget.org/packages/PackageMedic.Tool)
+[![CI](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml/badge.svg)](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml)
+[![License](https://img.shields.io/github/license/GonzMeza/package-medic)](LICENSE)
+[![Experimental](https://img.shields.io/badge/status-experimental-orange)](https://github.com/GonzMeza/package-medic/releases)
+
 PackageMedic is an experimental, read-only dependency doctor for SDK-style .NET projects. It finds stale Central Package Management entries, version drift, CPM bypasses, duplicate central versions, and important NuGet restore problems—then explains what to review.
 
 > [!IMPORTANT]
