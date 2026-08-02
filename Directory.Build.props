@@ -1,5 +1,9 @@
 <Project>
   <PropertyGroup>
+    <PackageMedicVersionFile>$(MSBuildThisFileDirectory)VERSION</PackageMedicVersionFile>
+    <PackageMedicVersion>$([System.IO.File]::ReadAllText('$(PackageMedicVersionFile)').Trim())</PackageMedicVersion>
+    <Version>$(PackageMedicVersion)</Version>
+    <PackageVersion>$(PackageMedicVersion)</PackageVersion>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>

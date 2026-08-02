@@ -1,6 +1,6 @@
 # PackageMedic website
 
-The animated landing page for PackageMedic. It introduces the experimental
+The animated landing page for PackageMedic. It introduces the stable
 NuGet dependency doctor, its diagnostics, read-only safety model, and install
 flow.
 
@@ -24,8 +24,8 @@ npm run dev
 
 ## Updating the release
 
-Change `product.version` in `app/product.ts`. The preview label, install command,
-and terminal example all reuse that single value.
+Change the repository-level `VERSION` file. The .NET package, executable, site
+label, install command, and terminal example all reuse that single value.
 
 ## Links
 

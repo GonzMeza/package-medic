@@ -79,7 +79,7 @@ export default function Home() {
         <div className="hero-copy">
           <div className="eyebrow">
             <span className="status-pixel" />
-            Experimental preview · v{product.version}
+            Stable release · v{product.version}
           </div>
           <h1>
             Your NuGet graph,
@@ -258,7 +258,7 @@ export default function Home() {
           <span className="section-kicker">Safe by design</span>
           <h2>Diagnosis without surprise edits.</h2>
           <p>
-            The experimental MVP is intentionally read-only. It does not apply
+            The first stable release is intentionally read-only. It does not apply
             fixes, rewrite project files, or collect telemetry.
           </p>
           <div className="safety-grid">
@@ -274,7 +274,7 @@ export default function Home() {
         <div className="cta-grid" aria-hidden="true" />
         <span className="section-kicker">Ready for a checkup?</span>
         <h2>Give your dependency graph a second opinion.</h2>
-        <p>Install the public preview and run your first read-only scan.</p>
+        <p>Install the stable release and run your first read-only scan.</p>
         <div className="install-box compact">
           <span className="prompt" aria-hidden="true">›</span>
           <code>{doctorCommand}</code>
@@ -293,7 +293,7 @@ export default function Home() {
           <img src={assetPath("packagemedic-icon.png")} alt="" width="30" height="30" />
           <span>PackageMedic</span>
         </div>
-        <p>Experimental open-source tooling for healthier .NET dependency graphs.</p>
+        <p>Open-source tooling for healthier .NET dependency graphs.</p>
         <div>
           <a href="https://github.com/GonzMeza/package-medic">GitHub</a>
           <a href={nugetUrl}>NuGet</a>

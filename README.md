@@ -11,13 +11,13 @@
   <a href="https://www.nuget.org/packages/PackageMedic.Tool"><img alt="NuGet downloads" src="https://img.shields.io/nuget/dt/PackageMedic.Tool.svg"></a>
   <a href="https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/GonzMeza/package-medic"></a>
-  <a href="https://github.com/GonzMeza/package-medic/releases"><img alt="Experimental status" src="https://img.shields.io/badge/status-experimental-orange"></a>
+  <a href="https://github.com/GonzMeza/package-medic/releases/tag/v0.1.0"><img alt="Stable status" src="https://img.shields.io/badge/status-stable%200.1.0-brightgreen"></a>
 </p>
 
-PackageMedic is an experimental, read-only dependency doctor for SDK-style .NET projects. It finds stale Central Package Management entries, version drift, CPM bypasses, duplicate central versions, and important NuGet restore problems—then explains what to review.
+PackageMedic 0.1 is the first stable, read-only dependency doctor for SDK-style .NET projects. It finds stale Central Package Management entries, version drift, CPM bypasses, duplicate central versions, and important NuGet restore problems—then explains what to review.
 
 > [!IMPORTANT]
-> PackageMedic is an early MVP. Review every diagnostic before changing dependency declarations.
+> PackageMedic 0.1 is stable for its documented read-only scope. Review every diagnostic before changing dependency declarations.
 
 PackageMedic is not affiliated with, maintained by, sponsored by, or endorsed by Microsoft. .NET, NuGet, and related names are trademarks of their respective owners.
 
@@ -27,7 +27,21 @@ Dependency problems often emerge across project boundaries: a `PackageVersion` c
 
 The MVP never writes to project files, props files, lock files, or assets files. Unless `--no-restore` is supplied, it runs the standard `dotnet restore` command and clearly reports that configured feeds may be contacted.
 
-## Requirements and local installation
+## Installation
+
+Install the latest stable release from NuGet:
+
+```console
+dotnet tool install --global PackageMedic.Tool
+```
+
+Update an existing installation:
+
+```console
+dotnet tool update --global PackageMedic.Tool
+```
+
+## Requirements and local development
 
 - .NET 8 runtime or newer runtime configured to roll forward.
 - A .NET SDK capable of loading the projects being analyzed.
@@ -153,6 +167,8 @@ Package publishing, feed administration, and replacing NuGet remain out of scope
 ## Contributing
 
 Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), and [SECURITY.md](SECURITY.md) before contributing.
+
+Release history is documented in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using PackageMedic.Cli;
+using PackageMedic.Core;
 
 namespace PackageMedic.IntegrationTests;
 
@@ -11,7 +12,7 @@ public sealed class CliIntegrationTests
         var result = await RunAsync("--version");
 
         Assert.Equal(0, result.ExitCode);
-        Assert.Equal("0.1.0-preview.1", result.Output.Trim());
+        Assert.Equal(PackageMedicAnalyzer.Version, result.Output.Trim());
     }
 
     [Fact]
@@ -83,6 +84,45 @@ public sealed class CliIntegrationTests
         var result = await RunAsync("doctor", Fixture("missing-assets"), "--no-restore", "--verbosity", "quiet");
 
         Assert.Equal(2, result.ExitCode);
+    }
+
+    [Fact]
+    public async Task DoctorPerformsRealRestoreBeforeAnalysis()
+    {
+        var directory = Directory.CreateTempSubdirectory("PackageMedic.Integration.");
+        try
+        {
+            var project = Path.Combine(directory.FullName, "RestoreSmoke.csproj");
+            await File.WriteAllTextAsync(
+                project,
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net8.0</TargetFramework>
+                    <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
+                  </PropertyGroup>
+                </Project>
+                """);
+
+            var result = await RunAsync(
+                "doctor",
+                project,
+                "--format",
+                "json",
+                "--fail-on",
+                "none",
+                "--verbosity",
+                "quiet");
+
+            Assert.Equal(0, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            Assert.Equal(1, json.RootElement.GetProperty("summary").GetProperty("projects").GetInt32());
+            Assert.Empty(json.RootElement.GetProperty("analysisErrors").EnumerateArray());
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
     }
 
     private static async Task<CliResult> RunAsync(params string[] arguments)

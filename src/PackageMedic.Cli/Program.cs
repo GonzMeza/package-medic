@@ -80,8 +80,8 @@ public static class Program
         _ => false,
     };
 
-    private const string HelpText = """
-PackageMedic 0.1.0-preview.1
+    private static string HelpText => $"""
+PackageMedic {PackageMedicAnalyzer.Version}
 
 Usage:
   package-medic doctor [path] [options]

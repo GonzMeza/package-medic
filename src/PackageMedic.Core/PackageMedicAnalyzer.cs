@@ -1,8 +1,14 @@
+using System.Reflection;
+
 namespace PackageMedic.Core;
 
 public sealed class PackageMedicAnalyzer
 {
-    public const string Version = "0.1.0-preview.1";
+    public static string Version { get; } =
+        typeof(PackageMedicAnalyzer).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion.Split('+', 2)[0]
+        ?? throw new InvalidOperationException("PackageMedic version metadata is missing.");
 
     private readonly ProjectDiscovery discovery;
     private readonly RestoreRunner restoreRunner;

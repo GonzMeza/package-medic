@@ -6,8 +6,12 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "sync-version": "node scripts/sync-version.mjs",
+    "predev": "npm run sync-version",
     "dev": "vinext dev",
+    "prebuild": "npm run sync-version",
     "build": "vinext build",
+    "prebuild:pages": "npm run sync-version",
     "build:pages": "next build",
     "start": "vinext start",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",

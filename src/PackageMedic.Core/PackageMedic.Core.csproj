@@ -5,4 +5,7 @@
     <RootNamespace>PackageMedic.Core</RootNamespace>
     <Description>Dependency analysis engine for PackageMedic.</Description>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="PackageMedic.Core.Tests" />
+  </ItemGroup>
 </Project>

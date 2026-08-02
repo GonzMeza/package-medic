@@ -1,7 +1,9 @@
+import { productVersion } from "./version.generated";
+
 export const product = {
   name: "PackageMedic",
   packageId: "PackageMedic.Tool",
-  version: "0.1.0-preview.1",
+  version: productVersion,
   command: "package-medic",
 } as const;
 

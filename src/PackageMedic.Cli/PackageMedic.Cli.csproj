@@ -4,15 +4,14 @@
     <TargetFramework>net8.0</TargetFramework>
     <AssemblyName>package-medic</AssemblyName>
     <RootNamespace>PackageMedic.Cli</RootNamespace>
-    <Version>0.1.0-preview.1</Version>
     <PackageId>PackageMedic.Tool</PackageId>
-    <PackageVersion>0.1.0-preview.1</PackageVersion>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>package-medic</ToolCommandName>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>packagemedic-icon.png</PackageIcon>
     <PackageProjectUrl>https://github.com/GonzMeza/package-medic</PackageProjectUrl>
+    <PackageReleaseNotes>First stable read-only release. Includes PM001-PM005 diagnostics, deterministic text and JSON output, configurable CI exit thresholds, restore controls, and credential redaction. Full notes: https://github.com/GonzMeza/package-medic/blob/v$(PackageMedicVersion)/CHANGELOG.md</PackageReleaseNotes>
     <PackageTags>dotnet;nuget;dependencies;msbuild;central-package-management;dotnet-tool</PackageTags>
     <Description>A read-only dependency doctor for SDK-style .NET projects.</Description>
     <Title>PackageMedic</Title>

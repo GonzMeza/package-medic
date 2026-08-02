@@ -64,7 +64,7 @@ public sealed class InfrastructureTests
     public void JsonOutputIsStableAndValid()
     {
         var result = new AnalysisResult(
-            "0.1.0-preview.1",
+            PackageMedicAnalyzer.Version,
             "/repo",
             new ScanSummary(1, 1, 0, 0, 0, 0, 0),
             [],
@@ -75,6 +75,24 @@ public sealed class InfrastructureTests
 
         Assert.Equal(first, second);
         using var document = JsonDocument.Parse(first);
-        Assert.Equal("0.1.0-preview.1", document.RootElement.GetProperty("version").GetString());
+        Assert.Equal(PackageMedicAnalyzer.Version, document.RootElement.GetProperty("version").GetString());
+    }
+
+    [Fact]
+    public void ProcessOutputRedactsFeedCredentialsAndSecretAssignments()
+    {
+        const string raw =
+            "https://build-user:super-secret@packages.example.test/v3/index.json " +
+            "token=abc123 password=hunter2 api_key=xyz789";
+
+        var redacted = ProcessRunner.RedactSecrets(raw);
+
+        Assert.DoesNotContain("build-user", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("super-secret", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("abc123", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("hunter2", redacted, StringComparison.Ordinal);
+        Assert.DoesNotContain("xyz789", redacted, StringComparison.Ordinal);
+        Assert.Contains("https://[REDACTED]@packages.example.test", redacted, StringComparison.Ordinal);
+        Assert.Contains("token=[REDACTED]", redacted, StringComparison.Ordinal);
     }
 }

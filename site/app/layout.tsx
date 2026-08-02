@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://gonzmeza.github.io/package-medic/"),
   title: "PackageMedic — A dependency doctor for .NET projects",
   description:
-    "Find unused NuGet packages, version drift, Central Package Management bypasses, and restore problems.",
+    "Find stale central package versions, version drift, Central Package Management bypasses, and restore problems.",
   icons: {
     icon: `${pagesBasePath}/packagemedic-icon.png`,
     shortcut: `${pagesBasePath}/packagemedic-icon.png`,
