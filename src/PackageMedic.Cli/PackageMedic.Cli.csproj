@@ -11,6 +11,8 @@
     <ToolCommandName>package-medic</ToolCommandName>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>packagemedic-icon.png</PackageIcon>
+    <PackageProjectUrl>https://github.com/GonzMeza/package-medic</PackageProjectUrl>
     <PackageTags>dotnet;nuget;dependencies;msbuild;central-package-management;dotnet-tool</PackageTags>
     <Description>A read-only dependency doctor for SDK-style .NET projects.</Description>
     <Title>PackageMedic</Title>
@@ -18,5 +20,6 @@
   <ItemGroup>
     <ProjectReference Include="..\PackageMedic.Core\PackageMedic.Core.csproj" />
     <None Include="..\..\README.md" Pack="true" PackagePath="/" />
+    <None Include="..\..\assets\brand\packagemedic-icon.png" Pack="true" PackagePath="/" />
   </ItemGroup>
 </Project>

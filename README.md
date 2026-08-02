@@ -1,10 +1,18 @@
-# PackageMedic
+<p align="center">
+  <img src="assets/brand/packagemedic-logo.png" width="180" alt="PackageMedic logo">
+</p>
 
-[![NuGet](https://img.shields.io/nuget/vpre/PackageMedic.Tool.svg)](https://www.nuget.org/packages/PackageMedic.Tool)
-[![NuGet Downloads](https://img.shields.io/nuget/dt/PackageMedic.Tool.svg)](https://www.nuget.org/packages/PackageMedic.Tool)
-[![CI](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml/badge.svg)](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/GonzMeza/package-medic)](LICENSE)
-[![Experimental](https://img.shields.io/badge/status-experimental-orange)](https://github.com/GonzMeza/package-medic/releases)
+<h1 align="center">PackageMedic</h1>
+
+<p align="center"><strong>A dependency doctor for .NET projects</strong></p>
+
+<p align="center">
+  <a href="https://www.nuget.org/packages/PackageMedic.Tool"><img alt="NuGet version" src="https://img.shields.io/nuget/vpre/PackageMedic.Tool.svg"></a>
+  <a href="https://www.nuget.org/packages/PackageMedic.Tool"><img alt="NuGet downloads" src="https://img.shields.io/nuget/dt/PackageMedic.Tool.svg"></a>
+  <a href="https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/GonzMeza/package-medic"></a>
+  <a href="https://github.com/GonzMeza/package-medic/releases"><img alt="Experimental status" src="https://img.shields.io/badge/status-experimental-orange"></a>
+</p>
 
 PackageMedic is an experimental, read-only dependency doctor for SDK-style .NET projects. It finds stale Central Package Management entries, version drift, CPM bypasses, duplicate central versions, and important NuGet restore problems—then explains what to review.
 
