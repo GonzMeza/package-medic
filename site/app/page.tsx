@@ -2,7 +2,13 @@
 
 /* eslint-disable @next/next/no-img-element */
 import { useState } from "react";
-import { doctorCommand, installCommand, nugetUrl, product } from "./product";
+import {
+  assetPath,
+  doctorCommand,
+  installCommand,
+  nugetUrl,
+  product,
+} from "./product";
 
 const diagnostics = [
   {
@@ -50,7 +56,7 @@ export default function Home() {
     <main>
       <nav className="nav-shell" aria-label="Primary navigation">
         <a className="brand-lockup" href="#top" aria-label="PackageMedic home">
-          <img src="/packagemedic-icon.png" alt="" width="34" height="34" />
+          <img src={assetPath("packagemedic-icon.png")} alt="" width="34" height="34" />
           <span>PackageMedic</span>
         </a>
         <div className="nav-links">
@@ -152,7 +158,7 @@ export default function Home() {
 
           <div className="core-cube">
             <span className="logo-orbit" aria-hidden="true" />
-            <img src="/packagemedic-mark-transparent.png" alt="PackageMedic logo" />
+            <img src={assetPath("packagemedic-mark-transparent.png")} alt="PackageMedic logo" />
           </div>
 
           <div className="scan-result">
@@ -284,7 +290,7 @@ export default function Home() {
 
       <footer>
         <div className="brand-lockup">
-          <img src="/packagemedic-icon.png" alt="" width="30" height="30" />
+          <img src={assetPath("packagemedic-icon.png")} alt="" width="30" height="30" />
           <span>PackageMedic</span>
         </div>
         <p>Experimental open-source tooling for healthier .NET dependency graphs.</p>

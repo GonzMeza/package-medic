@@ -1,15 +1,20 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import localFont from "next/font/local";
 import "./globals.css";
 
-const geistSans = Geist({
+const pagesBasePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+const siteUrl = "https://gonzmeza.github.io/package-medic/";
+
+const geistSans = localFont({
+  src: "./fonts/geist-latin.woff2",
   variable: "--font-geist-sans",
-  subsets: ["latin"],
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
+const geistMono = localFont({
+  src: "./fonts/geist-mono-latin.woff2",
   variable: "--font-geist-mono",
-  subsets: ["latin"],
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -18,22 +23,22 @@ export const metadata: Metadata = {
   description:
     "Find unused NuGet packages, version drift, Central Package Management bypasses, and restore problems.",
   icons: {
-    icon: "/packagemedic-icon.png",
-    shortcut: "/packagemedic-icon.png",
+    icon: `${pagesBasePath}/packagemedic-icon.png`,
+    shortcut: `${pagesBasePath}/packagemedic-icon.png`,
   },
   openGraph: {
     type: "website",
     title: "PackageMedic — A dependency doctor for .NET projects",
     description:
       "Read-only NuGet dependency diagnostics for SDK-style .NET projects.",
-    images: [{ url: "/og.png", width: 1280, height: 640, alt: "PackageMedic" }],
+    images: [{ url: `${siteUrl}og.png`, width: 1280, height: 640, alt: "PackageMedic" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "PackageMedic — A dependency doctor for .NET projects",
     description:
       "Read-only NuGet dependency diagnostics for SDK-style .NET projects.",
-    images: ["/og.png"],
+    images: [`${siteUrl}og.png`],
   },
 };
 
