@@ -65,6 +65,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
           IS_PRERELEASE: ${{ needs.build.outputs.prerelease }}
         run: |

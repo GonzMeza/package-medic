@@ -101,6 +101,7 @@ test('release workflow validates tags, builds assets, and never publishes to NuG
   const release = readFileSync(path.join(repository, '.github', 'workflows', 'release.yml'), 'utf8')
     .replaceAll('\r\n', '\n');
   assert.match(release, /node action\/prepare-release\.mjs/);
+  assert.match(release, /GH_REPO: \$\{\{ github\.repository \}\}/);
   assert.match(release, /dotnet restore PackageMedic\.sln --locked-mode/);
   assert.match(release, /dotnet build PackageMedic\.sln --configuration Release --no-restore/);
   assert.match(release, /dotnet test PackageMedic\.sln --configuration Release --no-build --no-restore/);
