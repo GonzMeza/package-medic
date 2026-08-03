@@ -8,6 +8,9 @@ import {
   installCommand,
   nugetUrl,
   product,
+  releaseLabel,
+  releaseNoun,
+  reportCommand,
 } from "./product";
 
 const diagnostics = [
@@ -62,6 +65,7 @@ export default function Home() {
         <div className="nav-links">
           <a href="#diagnostics">Diagnostics</a>
           <a href="#workflow">How it works</a>
+          <a href="#ci">CI</a>
           <a href="#safety">Safety</a>
         </div>
         <a
@@ -79,7 +83,7 @@ export default function Home() {
         <div className="hero-copy">
           <div className="eyebrow">
             <span className="status-pixel" />
-            Stable release · v{product.version}
+            {releaseLabel} · v{product.version}
           </div>
           <h1>
             Your NuGet graph,
@@ -116,7 +120,7 @@ export default function Home() {
           <ul className="hero-trust" aria-label="Key product traits">
             <li><span aria-hidden="true">◆</span> Read-only</li>
             <li><span aria-hidden="true">◆</span> No telemetry</li>
-            <li><span aria-hidden="true">◆</span> CI-ready JSON</li>
+            <li><span aria-hidden="true">◆</span> CI-ready SARIF</li>
           </ul>
         </div>
 
@@ -175,7 +179,7 @@ export default function Home() {
       <section className="signal-strip" aria-label="Compatibility summary">
         <div><strong>.NET 8–10</strong><span>SDK-style projects</span></div>
         <div><strong>CPM aware</strong><span>Effective MSBuild evaluation</span></div>
-        <div><strong>Text + JSON</strong><span>Human and CI output</span></div>
+        <div><strong>Text · JSON · SARIF</strong><span>Human and CI output</span></div>
         <div><strong>Cross-platform</strong><span>Windows · Linux · macOS</span></div>
       </section>
 
@@ -220,7 +224,7 @@ export default function Home() {
             <li><span>01</span><div><strong>Discover</strong><small>Project, solution, slnx, or directory.</small></div></li>
             <li><span>02</span><div><strong>Evaluate</strong><small>Imports, conditions, target frameworks, and CPM.</small></div></li>
             <li><span>03</span><div><strong>Resolve</strong><small>Direct and transitive packages from project.assets.json.</small></div></li>
-            <li><span>04</span><div><strong>Diagnose</strong><small>Stable text or deterministic JSON with exit codes.</small></div></li>
+            <li><span>04</span><div><strong>Diagnose</strong><small>Text, deterministic JSON, or SARIF with exit codes.</small></div></li>
           </ol>
         </div>
 
@@ -247,6 +251,57 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="section ci-section" id="ci">
+        <div className="section-heading">
+          <div>
+            <span className="section-kicker">Built for pull requests</span>
+            <h2>Diagnostics where the dependency changes happen.</h2>
+          </div>
+          <p>
+            Generate JSON and SARIF from one analysis or run the official GitHub
+            Action to place isolated findings beside the affected project files.
+          </p>
+        </div>
+        <div className="ci-grid">
+          <div className="terminal-window ci-terminal" aria-label="JSON and SARIF command example">
+            <div className="terminal-bar">
+              <span /><span /><span />
+              <small>one scan · two reports</small>
+            </div>
+            <div className="terminal-body">
+              <p><i>›</i> {reportCommand}</p>
+              <p className="muted">Wrote json report to reports/medic.json</p>
+              <p className="muted">Wrote sarif report to reports/medic.sarif</p>
+              <div className="terminal-rule" />
+              <p><span className="summary-ok">PM001–PM005 mapped</span></p>
+              <p className="muted">Stable fingerprints · repository-relative paths</p>
+            </div>
+          </div>
+          <div className="ci-features">
+            <article>
+              <span>01</span>
+              <strong>Native annotations</strong>
+              <p>Notice, warning, and error annotations include source locations.</p>
+            </article>
+            <article>
+              <span>02</span>
+              <strong>Code Scanning upload</strong>
+              <p>SARIF 2.1.0 integrates with GitHub without changing project files.</p>
+            </article>
+            <article>
+              <span>03</span>
+              <strong>One scan, two reports</strong>
+              <p>Atomic --output and --sarif-output files come from one analysis.</p>
+            </article>
+            <article>
+              <span>04</span>
+              <strong>Isolated Action runs</strong>
+              <p>Repeated steps keep separate report folders, artifacts, and SARIF categories.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <section className="section safety-section" id="safety">
         <div className="safety-cube" aria-hidden="true">
           <div className="shield-pixel">✓</div>
@@ -258,7 +313,7 @@ export default function Home() {
           <span className="section-kicker">Safe by design</span>
           <h2>Diagnosis without surprise edits.</h2>
           <p>
-            The first stable release is intentionally read-only. It does not apply
+            PackageMedic remains intentionally read-only. It does not apply
             fixes, rewrite project files, or collect telemetry.
           </p>
           <div className="safety-grid">
@@ -274,7 +329,7 @@ export default function Home() {
         <div className="cta-grid" aria-hidden="true" />
         <span className="section-kicker">Ready for a checkup?</span>
         <h2>Give your dependency graph a second opinion.</h2>
-        <p>Install the stable release and run your first read-only scan.</p>
+        <p>Install the current {releaseNoun} and run your first read-only scan.</p>
         <div className="install-box compact">
           <span className="prompt" aria-hidden="true">›</span>
           <code>{doctorCommand}</code>

@@ -1,23 +1,18 @@
-<p align="center">
-  <img src="assets/brand/packagemedic-logo.png" width="180" alt="PackageMedic logo">
-</p>
+![PackageMedic logo](https://raw.githubusercontent.com/GonzMeza/package-medic/v0.1.0/assets/brand/packagemedic-logo.png)
 
-<h1 align="center">PackageMedic</h1>
+# PackageMedic
 
-<p align="center"><strong>A dependency doctor for .NET projects</strong></p>
+**A dependency doctor for .NET projects**
 
-<p align="center">
-  <a href="https://www.nuget.org/packages/PackageMedic.Tool"><img alt="NuGet version" src="https://img.shields.io/nuget/vpre/PackageMedic.Tool.svg"></a>
-  <a href="https://www.nuget.org/packages/PackageMedic.Tool"><img alt="NuGet downloads" src="https://img.shields.io/nuget/dt/PackageMedic.Tool.svg"></a>
-  <a href="https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml"><img alt="CI status" src="https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/github/license/GonzMeza/package-medic"></a>
-  <a href="https://github.com/GonzMeza/package-medic/releases/tag/v0.1.0"><img alt="Stable status" src="https://img.shields.io/badge/status-stable%200.1.0-brightgreen"></a>
-</p>
+[![NuGet version](https://img.shields.io/nuget/v/PackageMedic.Tool.svg)](https://www.nuget.org/packages/PackageMedic.Tool)
+[![NuGet downloads](https://img.shields.io/nuget/dt/PackageMedic.Tool.svg)](https://www.nuget.org/packages/PackageMedic.Tool)
+[![CI status](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml/badge.svg)](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml)
+[![MIT license](https://img.shields.io/github/license/GonzMeza/package-medic)](LICENSE)
+[![Stable status](https://img.shields.io/badge/status-stable%200.2.0-brightgreen)](https://github.com/GonzMeza/package-medic/releases)
 
-PackageMedic 0.1 is the first stable, read-only dependency doctor for SDK-style .NET projects. It finds stale Central Package Management entries, version drift, CPM bypasses, duplicate central versions, and important NuGet restore problems—then explains what to review.
+PackageMedic 0.2 is the CI-focused stable release of the read-only dependency doctor for SDK-style .NET projects. It finds stale Central Package Management entries, version drift, CPM bypasses, duplicate central versions, and important NuGet restore problems—then explains what to review through text, JSON, SARIF, and GitHub annotations.
 
-> [!IMPORTANT]
-> PackageMedic 0.1 is stable for its documented read-only scope. Review every diagnostic before changing dependency declarations.
+> **Important:** PackageMedic 0.2 remains read-only. Review every diagnostic before changing dependency declarations.
 
 PackageMedic is not affiliated with, maintained by, sponsored by, or endorsed by Microsoft. .NET, NuGet, and related names are trademarks of their respective owners.
 
@@ -33,6 +28,12 @@ Install the latest stable release from NuGet:
 
 ```console
 dotnet tool install --global PackageMedic.Tool
+```
+
+Install PackageMedic 0.2 explicitly:
+
+```console
+dotnet tool install --global PackageMedic.Tool --version 0.2.0
 ```
 
 Update an existing installation:
@@ -75,7 +76,9 @@ The path is optional and defaults to the current directory.
 
 ```text
 --no-restore
---format text|json
+--format text|json|sarif
+--output, -o <path>
+--sarif-output <path>
 --fail-on none|warning|error
 --verbosity quiet|normal|detailed
 --version
@@ -93,9 +96,38 @@ package-medic doctor MySolution.sln --no-restore --verbosity detailed
 
 # Report findings without failing the command
 package-medic doctor --fail-on none
+
+# Produce a repository-relative SARIF 2.1.0 report for CI
+package-medic doctor . --format sarif --output artifacts/packagemedic.sarif
+
+# Produce JSON and SARIF from one analysis
+package-medic doctor . --format json --output artifacts/packagemedic.json --sarif-output artifacts/packagemedic.sarif
 ```
 
-Restore progress is written to standard error, so standard output remains valid JSON when `--format json` is selected.
+Restore progress is written to standard error, so standard output remains valid JSON or SARIF. `--output` atomically writes the selected format, while `--sarif-output` can additionally write SARIF from that same in-memory analysis. PackageMedic creates destination directories and never mixes progress into report files.
+
+## CI and SARIF
+
+PackageMedic 0.2 maps PM001–PM005 to deterministic SARIF 2.1.0 with repository-relative locations, stable fingerprints, rule help links, confidence, and original NuGet codes. SARIF can be consumed by GitHub Code Scanning or any compatible CI system.
+
+The official GitHub Action installs the PackageMedic version associated with its tag, emits native file annotations, writes a job summary, preserves the CLI exit-code contract, and can upload the SARIF report after the scan.
+
+```yaml
+permissions:
+  contents: read
+  security-events: write
+
+steps:
+  - uses: actions/checkout@v6
+  - uses: GonzMeza/package-medic@v0.2.0
+    with:
+      path: .
+      fail-on: warning
+      annotations: 'true'
+      upload-sarif: 'true'
+```
+
+Repositories without GitHub Code Scanning can disable `upload-sarif`; native annotations and the generated report remain available. See the [complete Action reference](action/README.md) for every input, output, permission, and security boundary.
 
 ## Diagnostics
 
@@ -107,11 +139,11 @@ Restore progress is written to standard error, so standard output remains valid 
 | PM004 | error | Multiple effective central entries define the same package for a project. |
 | PM005 | NuGet level | Restore or `project.assets.json` contains an important NU warning/error such as NU1605, NU1107, or NU1109. |
 
-Every diagnostic includes an explanation, evidence, affected project/scope, source location when available, a suggested action, and confidence where relevant. See [the diagnostic reference](docs/diagnostics/README.md).
+Every diagnostic includes an explanation, evidence, affected project/scope, source location when available, a suggested action, and confidence where relevant. See [the diagnostic reference](docs/diagnostics/README.md) and [the SARIF contract](docs/sarif.md).
 
 ## JSON and exit codes
 
-JSON output is stable, camel-cased, and contains `version`, `target`, scan `summary`, `diagnostics`, and `analysisErrors`. Diagnostics are deterministically ordered and never contain timestamps.
+JSON output is stable, camel-cased, and contains `version`, `target`, scan `summary`, `diagnostics`, and `analysisErrors`. SARIF uses version 2.1.0. Both machine-readable formats are deterministically ordered and never contain timestamps.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -136,7 +168,7 @@ JSON output is stable, camel-cased, and contains `version`, `target`, scan `summ
 - PackageMedic favors avoiding false positives: dynamically generated or unsafe-to-evaluate conditions may result in no diagnostic.
 - PM001 reasons over effective evaluated central items, direct references, and the existing resolved graph; it does not speculate about packages used only by source code reflection or custom build logic.
 - Restore failures are reported and return exit code `2`; PackageMedic does not replace NuGet restore.
-- No vulnerability scanning, SARIF, automatic fixes, IDE extension, or UI is included yet.
+- No vulnerability scanning, automatic fixes, IDE extension, or desktop UI is included yet.
 
 ## Repository layout
 
@@ -153,11 +185,10 @@ See [architecture.md](docs/architecture.md) for the execution boundary and desig
 
 ## Roadmap
 
-After the read-only MVP is proven:
+After the CI-focused 0.2 release is proven:
 
 - `clean --dry-run` and an explicitly gated `clean --apply`
 - dependency diffs against a Git ref
-- SARIF and a dedicated GitHub Action
 - assisted NU1605 repair and CPM migration
 - vulnerability analysis
 - Visual Studio or VS Code integration

@@ -1,0 +1,148 @@
+name: PackageMedic
+description: Diagnose NuGet dependency health and publish CI-friendly annotations and SARIF.
+author: GonzMeza
+
+branding:
+  icon: activity
+  color: blue
+
+inputs:
+  path:
+    description: Repository-relative project, solution, or directory to analyze.
+    required: false
+    default: .
+  tool-version:
+    description: Exact PackageMedic.Tool NuGet version to install (wildcards are rejected).
+    required: false
+    default: 0.2.0
+  dotnet-version:
+    description: .NET SDK version used to install and run PackageMedic.
+    required: false
+    default: 8.0.x
+  nuget-source:
+    description: HTTPS feed or trusted local directory used exclusively to install PackageMedic.Tool.
+    required: false
+    default: https://api.nuget.org/v3/index.json
+  restore:
+    description: Run dotnet restore before analysis.
+    required: false
+    default: 'true'
+  fail-on:
+    description: Fail at or above this severity (none, warning, or error).
+    required: false
+    default: warning
+  verbosity:
+    description: PackageMedic progress verbosity (quiet, normal, or detailed).
+    required: false
+    default: normal
+  annotations:
+    description: Emit GitHub notice, warning, and error annotations.
+    required: false
+    default: 'true'
+  upload-sarif:
+    description: Upload SARIF to GitHub code scanning when the repository permits it.
+    required: false
+    default: 'true'
+  upload-artifact:
+    description: Upload JSON and SARIF reports as a workflow artifact.
+    required: false
+    default: 'true'
+  artifact-name:
+    description: Safe base name for the report artifact; a per-invocation suffix is added.
+    required: false
+    default: packagemedic-report
+  category:
+    description: Safe Code Scanning category base; a per-invocation suffix is added.
+    required: false
+    default: packagemedic
+  output-directory:
+    description: Existing base directory inside GITHUB_WORKSPACE or RUNNER_TEMP for an isolated report folder.
+    required: false
+    default: ''
+
+outputs:
+  exit-code:
+    description: PackageMedic exit code (0 clean, 1 threshold reached, 2 operational error).
+    value: ${{ steps.scan.outputs.exit-code }}
+  json-file:
+    description: Absolute path to the JSON report.
+    value: ${{ steps.scan.outputs.json-file }}
+  sarif-file:
+    description: Absolute path to the SARIF report.
+    value: ${{ steps.scan.outputs.sarif-file }}
+  errors:
+    description: Number of error diagnostics.
+    value: ${{ steps.scan.outputs.errors }}
+  warnings:
+    description: Number of warning diagnostics.
+    value: ${{ steps.scan.outputs.warnings }}
+  information:
+    description: Number of informational diagnostics.
+    value: ${{ steps.scan.outputs.information }}
+  artifact-name:
+    description: Isolated artifact name generated for this invocation.
+    value: ${{ steps.scan.outputs.artifact-name }}
+  sarif-category:
+    description: Isolated Code Scanning category generated for this invocation.
+    value: ${{ steps.scan.outputs.sarif-category }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: ${{ inputs.dotnet-version }}
+
+    - name: Run PackageMedic
+      id: scan
+      continue-on-error: true
+      shell: bash
+      run: node "$GITHUB_ACTION_PATH/action/run.mjs"
+      env:
+        PACKAGEMEDIC_PATH: ${{ inputs.path }}
+        PACKAGEMEDIC_TOOL_VERSION: ${{ inputs.tool-version }}
+        PACKAGEMEDIC_NUGET_SOURCE: ${{ inputs.nuget-source }}
+        PACKAGEMEDIC_RESTORE: ${{ inputs.restore }}
+        PACKAGEMEDIC_FAIL_ON: ${{ inputs.fail-on }}
+        PACKAGEMEDIC_VERBOSITY: ${{ inputs.verbosity }}
+        PACKAGEMEDIC_ANNOTATIONS: ${{ inputs.annotations }}
+        PACKAGEMEDIC_UPLOAD_SARIF: ${{ inputs.upload-sarif }}
+        PACKAGEMEDIC_UPLOAD_ARTIFACT: ${{ inputs.upload-artifact }}
+        PACKAGEMEDIC_OUTPUT_DIRECTORY: ${{ inputs.output-directory }}
+        PACKAGEMEDIC_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        PACKAGEMEDIC_CATEGORY: ${{ inputs.category }}
+        PACKAGEMEDIC_ACTION_INSTANCE: ${{ github.action }}
+
+    - name: Upload SARIF
+      id: upload-sarif
+      if: ${{ always() && inputs.upload-sarif == 'true' && steps.scan.outputs.sarif-created == 'true' }}
+      continue-on-error: true
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ steps.scan.outputs.sarif-file }}
+        category: ${{ steps.scan.outputs.sarif-category }}
+
+    - name: Report unavailable code scanning
+      if: ${{ always() && inputs.upload-sarif == 'true' && steps.upload-sarif.outcome == 'failure' }}
+      shell: bash
+      run: echo "::warning title=PackageMedic SARIF upload::The scan completed, but GitHub could not accept the SARIF report. Check security-events permission and Code Security availability."
+
+    - name: Upload reports
+      if: ${{ always() && inputs.upload-artifact == 'true' && steps.scan.outputs.report-created == 'true' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.scan.outputs.artifact-name }}
+        path: |
+          ${{ steps.scan.outputs.json-file }}
+          ${{ steps.scan.outputs.sarif-file }}
+        if-no-files-found: warn
+        retention-days: 14
+
+    - name: Complete PackageMedic check
+      if: ${{ always() }}
+      shell: bash
+      run: node "$GITHUB_ACTION_PATH/action/finalize.mjs"
+      env:
+        PACKAGEMEDIC_EXIT_CODE: ${{ steps.scan.outputs.exit-code }}

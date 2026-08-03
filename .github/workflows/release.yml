@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+          cache: true
+          cache-dependency-path: '**/*.csproj'
+      - name: Validate tag and prepare release notes
+        id: release
+        run: node action/prepare-release.mjs
+      - run: dotnet restore PackageMedic.sln
+      - run: dotnet build PackageMedic.sln --configuration Release --no-restore
+      - run: dotnet test PackageMedic.sln --configuration Release --no-build --no-restore
+      - run: dotnet pack src/PackageMedic.Cli/PackageMedic.Cli.csproj --configuration Release --no-build --no-restore --output artifacts/release
+      - name: Generate SHA-256 checksum
+        run: node action/checksum.mjs artifacts/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ steps.release.outputs.version }}
+          path: artifacts/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  github-release:
+    if: ${{ github.repository == 'GonzMeza/package-medic' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets-${{ needs.build.outputs.version }}
+          path: artifacts/release
+      - name: Create immutable GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          IS_PRERELEASE: ${{ needs.build.outputs.prerelease }}
+        run: |
+          args=(--verify-tag --title "PackageMedic ${RELEASE_VERSION}" --notes-file artifacts/release/release-notes.md)
+          if [[ "${IS_PRERELEASE}" == "true" ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" artifacts/release/*.nupkg artifacts/release/SHA256SUMS.txt "${args[@]}"

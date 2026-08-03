@@ -38,19 +38,43 @@ public static class Program
 
         try
         {
+            ValidateOutputPaths(options);
             var analyzer = new PackageMedicAnalyzer();
             Action<string>? progress = options.Verbosity == OutputVerbosity.Quiet
                 ? null
                 : message => error.WriteLine(message);
             var outcome = await analyzer.AnalyzeAsync(options.Path, options.NoRestore, progress, cancellationToken).ConfigureAwait(false);
 
-            if (options.Format == OutputFormat.Json)
+            var rendered = await RenderResultAsync(outcome.Result, options).ConfigureAwait(false);
+            var additionalSarif = options.SarifOutputPath is null
+                ? null
+                : options.Format == OutputFormat.Sarif
+                    ? rendered
+                    : RenderSarif(outcome.Result);
+
+            if (additionalSarif is not null)
             {
-                await output.WriteLineAsync(ResultJsonSerializer.Serialize(outcome.Result)).ConfigureAwait(false);
+                await AtomicOutputFile.WriteAsync(
+                    options.SarifOutputPath!,
+                    additionalSarif,
+                    cancellationToken).ConfigureAwait(false);
+                if (options.Verbosity != OutputVerbosity.Quiet)
+                {
+                    await error.WriteLineAsync($"Wrote sarif report to {options.SarifOutputPath}").ConfigureAwait(false);
+                }
+            }
+
+            if (options.OutputPath is null)
+            {
+                await output.WriteAsync(rendered).ConfigureAwait(false);
             }
             else
             {
-                await TextResultWriter.WriteAsync(outcome.Result, options.Verbosity, output).ConfigureAwait(false);
+                await AtomicOutputFile.WriteAsync(options.OutputPath, rendered, cancellationToken).ConfigureAwait(false);
+                if (options.Verbosity != OutputVerbosity.Quiet)
+                {
+                    await error.WriteLineAsync($"Wrote {options.Format.ToString().ToLowerInvariant()} report to {options.OutputPath}").ConfigureAwait(false);
+                }
             }
 
             if (outcome.HasOperationalError)
@@ -72,6 +96,25 @@ public static class Program
         }
     }
 
+    private static void ValidateOutputPaths(CliOptions options)
+    {
+        if (options.OutputPath is null || options.SarifOutputPath is null)
+        {
+            return;
+        }
+
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        if (string.Equals(
+                Path.GetFullPath(options.OutputPath),
+                Path.GetFullPath(options.SarifOutputPath),
+                comparison))
+        {
+            throw new ArgumentException("--output and --sarif-output must use different paths.");
+        }
+    }
+
     private static bool ReachesThreshold(IReadOnlyList<Diagnostic> diagnostics, FailOnLevel failOn) => failOn switch
     {
         FailOnLevel.None => false,
@@ -79,6 +122,49 @@ public static class Program
         FailOnLevel.Error => diagnostics.Any(item => item.Severity >= DiagnosticSeverity.Error),
         _ => false,
     };
+
+    private static async Task<string> RenderResultAsync(AnalysisResult result, CliOptions options)
+    {
+        if (options.Format == OutputFormat.Json)
+        {
+            return ResultJsonSerializer.Serialize(result) + "\n";
+        }
+
+        if (options.Format == OutputFormat.Sarif)
+        {
+            return RenderSarif(result);
+        }
+
+        using var writer = new StringWriter();
+        await TextResultWriter.WriteAsync(result, options.Verbosity, writer).ConfigureAwait(false);
+        return writer.ToString();
+    }
+
+    private static string RenderSarif(AnalysisResult result) =>
+        SarifResultSerializer.Serialize(result, FindRepositoryRoot(result.Target)) + "\n";
+
+    private static string FindRepositoryRoot(string target)
+    {
+        var fullTarget = Path.GetFullPath(target);
+        var startingDirectory = File.Exists(fullTarget)
+            ? Path.GetDirectoryName(fullTarget)
+            : fullTarget;
+        var directory = new DirectoryInfo(startingDirectory ?? Directory.GetCurrentDirectory());
+        var fallback = directory.FullName;
+
+        while (directory is not null)
+        {
+            if (Directory.Exists(Path.Combine(directory.FullName, ".git")) ||
+                File.Exists(Path.Combine(directory.FullName, ".git")))
+            {
+                return directory.FullName;
+            }
+
+            directory = directory.Parent;
+        }
+
+        return fallback;
+    }
 
     private static string HelpText => $"""
 PackageMedic {PackageMedicAnalyzer.Version}
@@ -93,7 +179,9 @@ Arguments:
 
 Options:
   --no-restore                 Analyze existing project.assets.json files without restoring
-  --format text|json           Output format (default: text)
+  --format text|json|sarif     Output format (default: text)
+  --output, -o <path>          Write the report to a file instead of standard output
+  --sarif-output <path>        Also write a SARIF report from the same analysis
   --fail-on none|warning|error Exit 1 at or above this severity (default: warning)
   --verbosity quiet|normal|detailed
                                Diagnostic output detail (default: normal)
@@ -111,6 +199,7 @@ public enum OutputFormat
 {
     Text,
     Json,
+    Sarif,
 }
 
 public enum FailOnLevel
@@ -133,6 +222,8 @@ public sealed record CliOptions(
     OutputFormat Format,
     FailOnLevel FailOn,
     OutputVerbosity Verbosity,
+    string? OutputPath,
+    string? SarifOutputPath,
     bool ShowVersion,
     bool ShowHelp)
 {
@@ -140,17 +231,17 @@ public sealed record CliOptions(
     {
         if (arguments.Count == 0)
         {
-            return new CliOptions(null, false, OutputFormat.Text, FailOnLevel.Warning, OutputVerbosity.Normal, false, true);
+            return new CliOptions(null, false, OutputFormat.Text, FailOnLevel.Warning, OutputVerbosity.Normal, null, null, false, true);
         }
 
         if (arguments.Count == 1 && arguments[0] is "--version" or "-v")
         {
-            return new CliOptions(null, false, OutputFormat.Text, FailOnLevel.Warning, OutputVerbosity.Normal, true, false);
+            return new CliOptions(null, false, OutputFormat.Text, FailOnLevel.Warning, OutputVerbosity.Normal, null, null, true, false);
         }
 
         if (arguments.Count == 1 && arguments[0] is "--help" or "-h")
         {
-            return new CliOptions(null, false, OutputFormat.Text, FailOnLevel.Warning, OutputVerbosity.Normal, false, true);
+            return new CliOptions(null, false, OutputFormat.Text, FailOnLevel.Warning, OutputVerbosity.Normal, null, null, false, true);
         }
 
         if (!arguments[0].Equals("doctor", StringComparison.OrdinalIgnoreCase))
@@ -163,6 +254,8 @@ public sealed record CliOptions(
         var format = OutputFormat.Text;
         var failOn = FailOnLevel.Warning;
         var verbosity = OutputVerbosity.Normal;
+        string? outputPath = null;
+        string? sarifOutputPath = null;
         var showVersion = false;
         var showHelp = false;
 
@@ -183,7 +276,26 @@ public sealed record CliOptions(
             }
             else if (TryReadOption(arguments, ref index, "--format", out var formatValue))
             {
-                format = ParseEnum<OutputFormat>(formatValue, "--format", "text|json");
+                format = ParseEnum<OutputFormat>(formatValue, "--format", "text|json|sarif");
+            }
+            else if (TryReadOption(arguments, ref index, "--output", out var outputValue) ||
+                     TryReadOption(arguments, ref index, "-o", out outputValue))
+            {
+                if (string.IsNullOrWhiteSpace(outputValue))
+                {
+                    throw new UsageException("Option '--output' requires a non-empty path.");
+                }
+
+                outputPath = outputValue;
+            }
+            else if (TryReadOption(arguments, ref index, "--sarif-output", out var sarifOutputValue))
+            {
+                if (string.IsNullOrWhiteSpace(sarifOutputValue))
+                {
+                    throw new UsageException("Option '--sarif-output' requires a non-empty path.");
+                }
+
+                sarifOutputPath = sarifOutputValue;
             }
             else if (TryReadOption(arguments, ref index, "--fail-on", out var failOnValue))
             {
@@ -207,7 +319,7 @@ public sealed record CliOptions(
             }
         }
 
-        return new CliOptions(path, noRestore, format, failOn, verbosity, showVersion, showHelp);
+        return new CliOptions(path, noRestore, format, failOn, verbosity, outputPath, sarifOutputPath, showVersion, showHelp);
     }
 
     private static bool TryReadOption(IReadOnlyList<string> arguments, ref int index, string name, out string value)

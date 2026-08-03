@@ -8,6 +8,18 @@ permissions:
   contents: read
 
 jobs:
+  action-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test GitHub Action helpers and metadata
+        run: node --test action/tests/lib.test.mjs action/tests/metadata.test.mjs action/tests/release.test.mjs
+
   build-test-pack:
     strategy:
       fail-fast: false
@@ -16,7 +28,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
@@ -26,6 +38,30 @@ jobs:
       - run: dotnet build PackageMedic.sln --configuration Release --no-restore
       - run: dotnet test PackageMedic.sln --configuration Release --no-build --no-restore
       - run: dotnet pack src/PackageMedic.Cli/PackageMedic.Cli.csproj --configuration Release --no-build --no-restore --output artifacts/packages
+      - name: Read package version
+        id: package-version
+        shell: bash
+        run: echo "version=$(tr -d '\r\n' < VERSION)" >> "$GITHUB_OUTPUT"
+      - name: Smoke-test local GitHub Action
+        id: action-smoke
+        uses: ./
+        with:
+          path: fixtures/clean
+          tool-version: ${{ steps.package-version.outputs.version }}
+          nuget-source: ${{ github.workspace }}/artifacts/packages
+          restore: 'false'
+          fail-on: none
+          annotations: 'false'
+          upload-sarif: 'false'
+          upload-artifact: 'false'
+      - name: Verify Action reports
+        run: node action/verify-smoke.mjs
+        env:
+          PACKAGEMEDIC_EXIT_CODE: ${{ steps.action-smoke.outputs.exit-code }}
+          PACKAGEMEDIC_JSON_FILE: ${{ steps.action-smoke.outputs.json-file }}
+          PACKAGEMEDIC_SARIF_FILE: ${{ steps.action-smoke.outputs.sarif-file }}
+          PACKAGEMEDIC_ERRORS: ${{ steps.action-smoke.outputs.errors }}
+          PACKAGEMEDIC_WARNINGS: ${{ steps.action-smoke.outputs.warnings }}
       - uses: actions/upload-artifact@v4
         if: matrix.os == 'ubuntu-latest'
         with:

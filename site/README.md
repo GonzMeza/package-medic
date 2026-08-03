@@ -1,8 +1,8 @@
 # PackageMedic website
 
-The animated landing page for PackageMedic. It introduces the stable
-NuGet dependency doctor, its diagnostics, read-only safety model, and install
-flow.
+The animated landing page for PackageMedic. It follows the repository `VERSION`
+channel and introduces the NuGet dependency doctor, CI/SARIF workflow,
+diagnostics, read-only safety model, and install flow.
 
 ## Prerequisites
 
@@ -25,7 +25,7 @@ npm run dev
 ## Updating the release
 
 Change the repository-level `VERSION` file. The .NET package, executable, site
-label, install command, and terminal example all reuse that single value.
+label/channel, install command, and terminal example all reuse that single value.
 
 ## Links
 

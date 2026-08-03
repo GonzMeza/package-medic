@@ -11,12 +11,13 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>packagemedic-icon.png</PackageIcon>
     <PackageProjectUrl>https://github.com/GonzMeza/package-medic</PackageProjectUrl>
-    <PackageReleaseNotes>First stable read-only release. Includes PM001-PM005 diagnostics, deterministic text and JSON output, configurable CI exit thresholds, restore controls, and credential redaction. Full notes: https://github.com/GonzMeza/package-medic/blob/v$(PackageMedicVersion)/CHANGELOG.md</PackageReleaseNotes>
-    <PackageTags>dotnet;nuget;dependencies;msbuild;central-package-management;dotnet-tool</PackageTags>
+    <PackageReleaseNotes>PackageMedic 0.2 stable release with deterministic SARIF 2.1.0, single-analysis JSON and SARIF reports, atomic report files, native GitHub annotations, Code Scanning integration, and the existing read-only PM001-PM005 diagnostics. Full notes: https://github.com/GonzMeza/package-medic/blob/v$(PackageMedicVersion)/CHANGELOG.md</PackageReleaseNotes>
+    <PackageTags>dotnet;nuget;dependencies;msbuild;central-package-management;dotnet-tool;sarif;github-actions;code-scanning;ci</PackageTags>
     <Description>A read-only dependency doctor for SDK-style .NET projects.</Description>
     <Title>PackageMedic</Title>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="PackageMedic.IntegrationTests" />
     <ProjectReference Include="..\PackageMedic.Core\PackageMedic.Core.csproj" />
     <None Include="..\..\README.md" Pack="true" PackagePath="/" />
     <None Include="..\..\assets\brand\packagemedic-icon.png" Pack="true" PackagePath="/" />

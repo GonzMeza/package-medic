@@ -654,6 +654,16 @@ a:focus-visible {
 .summary-warn { color: var(--warning); }
 .terminal-cursor { animation: cursor-blink 1s steps(2, end) infinite; background: var(--mint); bottom: 26px; height: 13px; position: absolute; width: 7px; }
 
+.ci-section { padding-top: 72px; }
+.ci-grid { align-items: stretch; display: grid; gap: 18px; grid-template-columns: 1.1fr 0.9fr; }
+.ci-terminal .terminal-body { min-height: 280px; }
+.ci-terminal .terminal-body > p:first-child { overflow-wrap: anywhere; }
+.ci-features { display: grid; gap: 12px; }
+.ci-features article { background: linear-gradient(145deg, rgba(12, 31, 53, 0.92), rgba(5, 15, 29, 0.96)); border: 1px solid var(--line); display: grid; gap: 8px; grid-template-columns: auto 1fr; padding: 22px; }
+.ci-features article > span { color: var(--cyan); font-family: var(--font-geist-mono), monospace; font-size: 10px; grid-row: span 2; padding-top: 3px; }
+.ci-features strong { font-size: 15px; }
+.ci-features p { color: var(--muted); font-size: 12px; line-height: 1.55; margin: 0; }
+
 .safety-section {
   align-items: center;
   background: linear-gradient(135deg, rgba(8, 24, 42, 0.8), rgba(5, 14, 27, 0.7));
@@ -732,6 +742,7 @@ footer a:hover { color: var(--cyan-soft); }
   .hero h1 { font-size: clamp(50px, 7vw, 74px); }
   .section-heading { gap: 30px; }
   .workflow-section { gap: 42px; }
+  .ci-grid { grid-template-columns: 1fr; }
   .safety-section { gap: 54px; padding: 52px; }
 }
 

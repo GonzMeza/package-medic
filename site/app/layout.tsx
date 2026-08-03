@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://gonzmeza.github.io/package-medic/"),
   title: "PackageMedic — A dependency doctor for .NET projects",
   description:
-    "Find stale central package versions, version drift, Central Package Management bypasses, and restore problems.",
+    "Find NuGet dependency problems and report them through text, JSON, SARIF, and GitHub annotations.",
   icons: {
     icon: `${pagesBasePath}/packagemedic-icon.png`,
     shortcut: `${pagesBasePath}/packagemedic-icon.png`,
@@ -30,14 +30,14 @@ export const metadata: Metadata = {
     type: "website",
     title: "PackageMedic — A dependency doctor for .NET projects",
     description:
-      "Read-only NuGet dependency diagnostics for SDK-style .NET projects.",
+      "Read-only NuGet diagnostics with deterministic SARIF and GitHub CI integration.",
     images: [{ url: `${siteUrl}og.png`, width: 1280, height: 640, alt: "PackageMedic" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "PackageMedic — A dependency doctor for .NET projects",
     description:
-      "Read-only NuGet dependency diagnostics for SDK-style .NET projects.",
+      "Read-only NuGet diagnostics with deterministic SARIF and GitHub CI integration.",
     images: [`${siteUrl}og.png`],
   },
 };

@@ -33,5 +33,13 @@ test("server-renders the PackageMedic landing page", async () => {
   assert.match(html, /PackageMedic\.Tool/);
   assert.match(html, /Read-only/);
   assert.match(html, /PM001/);
+  assert.match(html, /Stable release/);
+  assert.match(html, /0\.2\.0/);
+  assert.doesNotMatch(html, /Development preview/);
+  assert.match(html, /SARIF/);
+  assert.match(html, /--output/);
+  assert.match(html, /--sarif-output/);
+  assert.match(html, /One scan, two reports/);
+  assert.match(html, /Isolated Action runs/);
   assert.doesNotMatch(html, /react-loading-skeleton|Your site is taking shape/);
 });
