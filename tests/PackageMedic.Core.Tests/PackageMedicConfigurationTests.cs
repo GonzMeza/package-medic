@@ -28,6 +28,7 @@ public sealed class PackageMedicConfigurationTests
                   "reason": " Migration tracked in issue 42. "
                 }
               ],
+              "maxParallelism": 6,
               "timeouts": {
                 "restoreSeconds": 120,
                 "evaluationSeconds": 30
@@ -50,6 +51,7 @@ public sealed class PackageMedicConfigurationTests
         Assert.Equal("Migration tracked in issue 42.", suppression.Reason);
         Assert.Equal(120, configuration.Timeouts.RestoreSeconds);
         Assert.Equal(30, configuration.Timeouts.EvaluationSeconds);
+        Assert.Equal(6, configuration.MaxParallelism);
     }
 
     [Fact]
@@ -144,6 +146,7 @@ public sealed class PackageMedicConfigurationTests
     [InlineData("{\"schemaVersion\":1,\"exclude\":[\"../outside/**\"]}", "repository-relative")]
     [InlineData("{\"schemaVersion\":1,\"baseline\":\"../outside.json\"}", "repository-relative")]
     [InlineData("{\"schemaVersion\":1,\"timeouts\":{\"restoreSeconds\":0}}", "between 1 and 3600")]
+    [InlineData("{\"schemaVersion\":1,\"maxParallelism\":33}", "between 1 and 32")]
     public void RejectsInvalidConfiguration(string json, string expectedMessage)
     {
         var exception = Assert.Throws<PackageMedicConfigurationException>(
@@ -181,6 +184,40 @@ public sealed class PackageMedicConfigurationTests
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RejectsOversizedConfigurationDocumentsAndCollections()
+    {
+        var oversizedText = new string('x', PackageMedicConfigurationLoader.MaximumConfigurationCharacters + 1);
+        var textException = Assert.Throws<PackageMedicConfigurationException>(
+            () => PackageMedicConfigurationLoader.Parse(oversizedText, "oversized.json"));
+        Assert.Contains("safety limit", textException.Message, StringComparison.OrdinalIgnoreCase);
+
+        var exclusions = string.Join(',', Enumerable.Range(0, PackageMedicConfigurationLoader.MaximumExcludePatterns + 1)
+            .Select(index => $"\"path-{index}\""));
+        var collectionException = Assert.Throws<PackageMedicConfigurationException>(
+            () => PackageMedicConfigurationLoader.Parse(
+                $"{{\"schemaVersion\":1,\"exclude\":[{exclusions}]}}",
+                "too-many.json"));
+        Assert.Contains("cannot contain more", collectionException.Message, StringComparison.OrdinalIgnoreCase);
+
+        var path = Path.Combine(Path.GetTempPath(), $"packagemedic-config-{Guid.NewGuid():N}.json");
+        try
+        {
+            using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                stream.SetLength(PackageMedicConfigurationLoader.MaximumConfigurationCharacters + 1L);
+            }
+
+            var fileException = Assert.Throws<PackageMedicConfigurationException>(
+                () => PackageMedicConfigurationLoader.Load(path));
+            Assert.Contains("safety limit", fileException.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            File.Delete(path);
         }
     }
 

@@ -8,6 +8,10 @@ namespace PackageMedic.Core;
 public sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError)
 {
     public string CombinedOutput => string.Concat(StandardOutput, Environment.NewLine, StandardError);
+
+    public bool StandardOutputTruncated => ProcessRunner.WasTruncated(StandardOutput);
+
+    public bool StandardErrorTruncated => ProcessRunner.WasTruncated(StandardError);
 }
 
 public interface IProcessRunner
@@ -17,7 +21,8 @@ public interface IProcessRunner
 
 public sealed partial class ProcessRunner : IProcessRunner
 {
-    internal const int DefaultMaximumOutputCharacters = 1_000_000;
+    internal const int DefaultMaximumOutputCharacters = 8_000_000;
+    private const string TruncationMarker = "[PackageMedic: subprocess output truncated]";
     private static readonly TimeSpan CancellationCleanupTimeout = TimeSpan.FromSeconds(2);
 
     private readonly int maximumOutputCharacters;
@@ -132,16 +137,21 @@ public sealed partial class ProcessRunner : IProcessRunner
         if (truncated)
         {
             builder.AppendLine();
-            builder.Append("[PackageMedic: subprocess output truncated]");
+            builder.Append(TruncationMarker);
         }
 
         return builder.ToString();
     }
 
+    internal static bool WasTruncated(string value) =>
+        value.EndsWith(TruncationMarker, StringComparison.Ordinal);
+
     internal static string RedactSecrets(string value)
     {
+        ArgumentNullException.ThrowIfNull(value);
         value = CredentialsInUrlRegex().Replace(value, "${scheme}[REDACTED]@");
-        return SecretAssignmentRegex().Replace(value, "${name}=[REDACTED]");
+        value = SecretAssignmentRegex().Replace(value, "${name}=[REDACTED]");
+        return UnsafeControlCharactersRegex().Replace(value, string.Empty);
     }
 
     internal static bool IsExpectedTerminationException(Exception exception) => exception is
@@ -150,9 +160,12 @@ public sealed partial class ProcessRunner : IProcessRunner
         NotSupportedException or
         AggregateException;
 
-    [GeneratedRegex("(?<scheme>https?://)[^/@\\s:]+:[^/@\\s]+@", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("(?<scheme>https?://)[^/@\\s:]+:[^/@\\s]+@", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
     private static partial Regex CredentialsInUrlRegex();
 
-    [GeneratedRegex("(?<name>(?:password|token|apikey|api_key|username))\\s*=\\s*[^;\\s]+", RegexOptions.IgnoreCase)]
+    [GeneratedRegex("(?<name>(?:password|token|apikey|api_key|username))\\s*=\\s*[^;\\s\"',}\\]]+", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
     private static partial Regex SecretAssignmentRegex();
+
+    [GeneratedRegex("[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\x7F]", RegexOptions.NonBacktracking)]
+    private static partial Regex UnsafeControlCharactersRegex();
 }

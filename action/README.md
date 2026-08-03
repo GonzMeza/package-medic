@@ -9,13 +9,15 @@ permissions:
 
 steps:
   - uses: actions/checkout@v6
-  - uses: GonzMeza/package-medic@v0.3.0
+  - uses: GonzMeza/package-medic@v0.4.0
     with:
       path: .
       config: .packagemedic.json
       baseline: .packagemedic-baseline.json
       fail-on: none
       fail-on-new: warning
+      audit: 'true'
+      include-transitive-audit: 'true'
       restore: 'true'
       annotations: new
       upload-sarif: 'true'
@@ -31,7 +33,7 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 | Input | Default | Purpose |
 | --- | --- | --- |
 | `path` | `.` | Project, solution, or directory to scan |
-| `tool-version` | `0.3.0` | Exact PackageMedic.Tool version |
+| `tool-version` | `0.4.0` | Exact PackageMedic.Tool version |
 | `dotnet-version` | `8.0.x` | SDK used by the action |
 | `nuget-source` | NuGet.org | Exclusive feed used to install the tool |
 | `restore` | `true` | Restore before the first scan |
@@ -39,7 +41,11 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 | `fail-on-new` | unset | Optional `none`, `warning`, or `error` threshold for new diagnostics |
 | `config` | unset | Repository-relative PackageMedic configuration file |
 | `baseline` | unset | Repository-relative PackageMedic baseline file |
+| `audit` | `false` | Ask the active SDK/NuGet tooling for known vulnerabilities and emit PM007 |
+| `include-transitive-audit` | `true` | Include transitive packages when `audit` is enabled |
+| `diff-base` | unset | Reachable Git reference to compare with the checked-out graph |
 | `verbosity` | `normal` | `quiet`, `normal`, or `detailed` |
+| `max-parallelism` | automatic (up to 4) | Maximum concurrent restore, audit, and MSBuild processes (`1`-`32`) |
 | `annotations` | `new` | `new`, `all`, or `none`; legacy `true`/`false` map to `all`/`none` |
 | `upload-sarif` | `true` | Send SARIF to code scanning |
 | `upload-artifact` | `true` | Retain JSON and SARIF for 14 days |
@@ -56,5 +62,9 @@ Every invocation receives its own report folder, artifact name, and SARIF catego
 With a baseline, the recommended CI policy is `fail-on: none` plus `fail-on-new: warning`. Existing findings remain visible without blocking the pull request, while newly introduced warnings and errors can fail the check. The default annotation mode is `new`; choose `all` to retain the pre-0.3 behavior or `none` to disable workflow annotations. Reports produced by a pre-0.3 tool do not contain baseline metadata, so the action conservatively treats all of their diagnostics as new instead of silently hiding annotations. The job summary always reports new, existing, resolved, and policy-suppressed counts.
 
 `config` and `baseline` are passed to the same PackageMedic analysis that writes JSON and SARIF. Both must identify existing files inside `GITHUB_WORKSPACE`; paths that escape through `..` or symbolic links are rejected before the tool runs.
+
+`audit` delegates to the official `dotnet list package --vulnerable` command and can contact configured NuGet sources; the action does not implement an advisory client. `include-transitive-audit` has no effect until `audit` is enabled.
+
+With `diff-base`, use `actions/checkout` with enough history (normally `fetch-depth: 0`) so the reference exists locally. Diff mode already selects added or worsened findings, so `baseline` and `fail-on-new` are rejected when `diff-base` is set. Package and CPM changes remain available in JSON and the job summary; SARIF contains current added/worsened diagnostics. The default `restore: 'true'` analyzes both graphs. With `restore: 'false'`, both revisions must contain usable tracked assets files; if either analysis fails, the Action reports an incomplete comparison, publishes no partial changes, and returns operational exit code `2`.
 
 Artifact and category base names accept letters, numbers, dots, underscores, and hyphens. Custom `output-directory` values must identify an existing base directory; the action creates only its isolated child directory after verifying that the base stays within the workspace or runner temporary directory.

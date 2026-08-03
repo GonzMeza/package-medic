@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using PackageMedic.Cli;
 using PackageMedic.Core;
@@ -6,6 +7,19 @@ namespace PackageMedic.IntegrationTests;
 
 public sealed class CliIntegrationTests
 {
+    [Fact]
+    public async Task ParallelismOptionIsValidatedAndAccepted()
+    {
+        var rejected = await RunAsync(
+            "doctor", Fixture("clean"), "--no-restore", "--max-parallelism", "0", "--verbosity", "quiet");
+        var accepted = await RunAsync(
+            "doctor", Fixture("clean"), "--no-restore", "--max-parallelism", "2", "--verbosity", "quiet");
+
+        Assert.Equal(2, rejected.ExitCode);
+        Assert.Contains("between 1 and 32", rejected.Error, StringComparison.Ordinal);
+        Assert.Equal(0, accepted.ExitCode);
+    }
+
     [Fact]
     public async Task VersionCommandSucceeds()
     {
@@ -144,7 +158,8 @@ public sealed class CliIntegrationTests
             Assert.Equal(string.Empty, result.Output);
             Assert.Equal(string.Empty, result.Error);
             Assert.True(File.Exists(reportPath));
-            using var report = JsonDocument.Parse(await File.ReadAllTextAsync(reportPath));
+            using var report = JsonDocument.Parse(
+                await File.ReadAllTextAsync(reportPath, TestContext.Current.CancellationToken));
             Assert.Equal(PackageMedicAnalyzer.Version, report.RootElement.GetProperty("version").GetString());
             Assert.Empty(Directory.EnumerateFiles(Path.GetDirectoryName(reportPath)!, "*.tmp"));
         }
@@ -160,7 +175,7 @@ public sealed class CliIntegrationTests
         var reportPath = Path.GetTempFileName();
         try
         {
-            await File.WriteAllTextAsync(reportPath, "stale");
+            await File.WriteAllTextAsync(reportPath, "stale", TestContext.Current.CancellationToken);
             var result = await RunAsync(
                 "doctor",
                 Fixture("clean", "Clean.slnx"),
@@ -171,8 +186,11 @@ public sealed class CliIntegrationTests
                 "--verbosity=quiet");
 
             Assert.Equal(0, result.ExitCode);
-            Assert.NotEqual("stale", await File.ReadAllTextAsync(reportPath));
-            using var report = JsonDocument.Parse(await File.ReadAllTextAsync(reportPath));
+            Assert.NotEqual(
+                "stale",
+                await File.ReadAllTextAsync(reportPath, TestContext.Current.CancellationToken));
+            using var report = JsonDocument.Parse(
+                await File.ReadAllTextAsync(reportPath, TestContext.Current.CancellationToken));
             Assert.Equal(1, report.RootElement.GetProperty("summary").GetProperty("projects").GetInt32());
         }
         finally
@@ -200,7 +218,7 @@ public sealed class CliIntegrationTests
 
             Assert.Equal(0, result.ExitCode);
             Assert.Equal(string.Empty, result.Output);
-            var report = await File.ReadAllTextAsync(reportPath);
+            var report = await File.ReadAllTextAsync(reportPath, TestContext.Current.CancellationToken);
             Assert.Contains("Summary:", report, StringComparison.Ordinal);
             Assert.Contains("0 warnings", report, StringComparison.Ordinal);
         }
@@ -235,8 +253,10 @@ public sealed class CliIntegrationTests
 
             Assert.Equal(0, result.ExitCode);
             Assert.Equal(string.Empty, result.Output);
-            using var json = JsonDocument.Parse(await File.ReadAllTextAsync(jsonPath));
-            using var sarif = JsonDocument.Parse(await File.ReadAllTextAsync(sarifPath));
+            using var json = JsonDocument.Parse(
+                await File.ReadAllTextAsync(jsonPath, TestContext.Current.CancellationToken));
+            using var sarif = JsonDocument.Parse(
+                await File.ReadAllTextAsync(sarifPath, TestContext.Current.CancellationToken));
             Assert.Contains(
                 json.RootElement.GetProperty("diagnostics").EnumerateArray(),
                 item => item.GetProperty("code").GetString() == "PM001");
@@ -325,7 +345,8 @@ public sealed class CliIntegrationTests
                     <RestoreIgnoreFailedSources>true</RestoreIgnoreFailedSources>
                   </PropertyGroup>
                 </Project>
-                """);
+                """,
+                TestContext.Current.CancellationToken);
 
             var result = await RunAsync(
                 "doctor",
@@ -337,7 +358,9 @@ public sealed class CliIntegrationTests
                 "--verbosity",
                 "quiet");
 
-            Assert.Equal(0, result.ExitCode);
+            Assert.True(
+                result.ExitCode == 0,
+                $"doctor failed with exit code {result.ExitCode}: {result.Error}\n{result.Output}");
             using var json = JsonDocument.Parse(result.Output);
             Assert.Equal(1, json.RootElement.GetProperty("summary").GetProperty("projects").GetInt32());
             Assert.Empty(json.RootElement.GetProperty("analysisErrors").EnumerateArray());
@@ -352,13 +375,136 @@ public sealed class CliIntegrationTests
     public async Task RulesAndExplainExposeTheDiagnosticCatalog()
     {
         var rules = await RunAsync("rules");
-        var explanation = await RunAsync("explain", "PM006");
+        var explanation = await RunAsync("explain", "PM007");
 
         Assert.Equal(0, rules.ExitCode);
         Assert.Contains("PM006", rules.Output, StringComparison.Ordinal);
+        Assert.Contains("PM007", rules.Output, StringComparison.Ordinal);
         Assert.Contains("FloatingPackageVersion", rules.Output, StringComparison.Ordinal);
         Assert.Equal(0, explanation.ExitCode);
-        Assert.Contains("floating", explanation.Output, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("vulnerab", explanation.Output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task JsonIncludesPortableStructuredPackageInventory()
+    {
+        var result = await RunAsync(
+            "doctor", Fixture("version-drift"), "--no-restore", "--format", "json",
+            "--fail-on", "none", "--verbosity", "quiet");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.DoesNotContain(Fixture("version-drift"), result.Output, StringComparison.OrdinalIgnoreCase);
+        using var json = JsonDocument.Parse(result.Output);
+        var packages = json.RootElement.GetProperty("packages").EnumerateArray().ToArray();
+        Assert.Equal(2, packages.Length);
+        Assert.All(packages, package =>
+        {
+            Assert.Equal("direct", package.GetProperty("dependencyKind").GetString());
+            Assert.Equal("project", package.GetProperty("versionSource").GetString());
+            Assert.DoesNotContain(Directory.GetCurrentDirectory(), package.GetProperty("project").GetString()!, StringComparison.OrdinalIgnoreCase);
+        });
+        Assert.Contains(packages, package => package.GetProperty("resolvedVersion").GetString() == "2.6.2");
+        Assert.Contains(packages, package => package.GetProperty("resolvedVersion").GetString() == "2.9.2");
+    }
+
+    [Fact]
+    public async Task DiffRejectsBaselineOptionsBeforeRunningGit()
+    {
+        var baseline = await RunAsync("diff", "HEAD", ".", "--baseline", "known.json");
+        var failOnNew = await RunAsync("diff", "HEAD", ".", "--fail-on-new", "warning");
+
+        Assert.Equal(2, baseline.ExitCode);
+        Assert.Contains("does not accept --baseline", baseline.Error, StringComparison.Ordinal);
+        Assert.Equal(2, failOnNew.ExitCode);
+        Assert.Contains("does not accept --fail-on-new", failOnNew.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DiffComparesTheWorkingGraphWithoutSwitchingTheRepository()
+    {
+        var repository = Directory.CreateTempSubdirectory("PackageMedic.DiffIntegration.");
+        try
+        {
+            var project = Path.Combine(repository.FullName, "App.csproj");
+            var assetsDirectory = Path.Combine(repository.FullName, ".assets");
+            var assets = Path.Combine(assetsDirectory, "project.assets.json");
+            Directory.CreateDirectory(assetsDirectory);
+            await WritePackageProjectAsync(project, "1.0.0");
+            await WriteAssetsAsync(assets, "1.0.0");
+            await RunGitAsync(repository.FullName, "init");
+            await RunGitAsync(repository.FullName, "config", "user.name", "PackageMedic Tests");
+            await RunGitAsync(repository.FullName, "config", "user.email", "packagemedic@example.invalid");
+            await RunGitAsync(repository.FullName, "add", ".");
+            await RunGitAsync(repository.FullName, "commit", "-m", "baseline");
+
+            await WritePackageProjectAsync(project, "2.0.0");
+            await WriteAssetsAsync(assets, "2.0.0");
+            var result = await RunAsync(
+                "diff", "HEAD", repository.FullName, "--no-restore", "--format", "json",
+                "--fail-on", "none", "--verbosity", "quiet");
+
+            Assert.Equal(0, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            var change = Assert.Single(json.RootElement.GetProperty("diff").GetProperty("packageChanges").EnumerateArray());
+            Assert.Equal("versionChanged", change.GetProperty("kind").GetString());
+            Assert.Equal("1.0.0", change.GetProperty("before").GetProperty("resolvedVersion").GetString());
+            Assert.Equal("2.0.0", change.GetProperty("after").GetProperty("resolvedVersion").GetString());
+            Assert.Contains(
+                "2.0.0",
+                await File.ReadAllTextAsync(project, TestContext.Current.CancellationToken),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            foreach (var file in Directory.EnumerateFiles(repository.FullName, "*", SearchOption.AllDirectories))
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+            }
+
+            repository.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DiffReportsBaseAnalysisErrorsWithoutPublishingPartialChanges()
+    {
+        var repository = Directory.CreateTempSubdirectory("PackageMedic.DiffIncomplete.");
+        try
+        {
+            var project = Path.Combine(repository.FullName, "App.csproj");
+            var assetsDirectory = Path.Combine(repository.FullName, ".assets");
+            var assets = Path.Combine(assetsDirectory, "project.assets.json");
+            await WritePackageProjectAsync(project, "1.0.0");
+            await RunGitAsync(repository.FullName, "init");
+            await RunGitAsync(repository.FullName, "config", "user.name", "PackageMedic Tests");
+            await RunGitAsync(repository.FullName, "config", "user.email", "packagemedic@example.invalid");
+            await RunGitAsync(repository.FullName, "add", "App.csproj");
+            await RunGitAsync(repository.FullName, "commit", "-m", "baseline without assets");
+
+            Directory.CreateDirectory(assetsDirectory);
+            await WriteAssetsAsync(assets, "1.0.0");
+            var result = await RunAsync(
+                "diff", "HEAD", repository.FullName, "--no-restore", "--format", "json",
+                "--fail-on", "none", "--verbosity", "quiet");
+
+            Assert.Equal(2, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            var diff = json.RootElement.GetProperty("diff");
+            Assert.False(diff.GetProperty("isComplete").GetBoolean());
+            Assert.NotEmpty(diff.GetProperty("baselineAnalysisErrors").EnumerateArray());
+            Assert.Empty(diff.GetProperty("currentAnalysisErrors").EnumerateArray());
+            Assert.Empty(diff.GetProperty("changes").EnumerateArray());
+            Assert.Empty(diff.GetProperty("packageChanges").EnumerateArray());
+        }
+        finally
+        {
+            foreach (var file in Directory.EnumerateFiles(repository.FullName, "*", SearchOption.AllDirectories))
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+            }
+
+            repository.Delete(recursive: true);
+        }
     }
 
     [Fact]
@@ -417,7 +563,8 @@ public sealed class CliIntegrationTests
                     { "rule": "PM001", "reason": "Accepted until the next dependency cleanup" }
                   ]
                 }
-                """);
+                """,
+                TestContext.Current.CancellationToken);
 
             var result = await RunAsync(
                 "doctor", Fixture("unused-central"), "--no-restore", "--config", configurationPath,
@@ -485,7 +632,8 @@ public sealed class CliIntegrationTests
                 baselinePath,
                 """
                 { "schemaVersion": 2, "toolVersion": "0.3.0", "entries": [] }
-                """);
+                """,
+                TestContext.Current.CancellationToken);
 
             var result = await RunAsync(
                 "doctor", Fixture("clean", "Clean.slnx"), "--no-restore", "--no-config",
@@ -519,7 +667,11 @@ public sealed class CliIntegrationTests
     {
         using var output = new StringWriter();
         using var error = new StringWriter();
-        var exitCode = await Program.ExecuteAsync(arguments, output, error);
+        var exitCode = await Program.ExecuteAsync(
+            arguments,
+            output,
+            error,
+            TestContext.Current.CancellationToken);
         return new CliResult(exitCode, output.ToString(), error.ToString());
     }
 
@@ -533,6 +685,61 @@ public sealed class CliIntegrationTests
 
         Assert.NotNull(directory);
         return Path.Combine([directory!.FullName, "fixtures", .. parts]);
+    }
+
+    private static Task WritePackageProjectAsync(string path, string version) => File.WriteAllTextAsync(
+        path,
+        $$"""
+        <Project Sdk="Microsoft.NET.Sdk">
+          <PropertyGroup>
+            <TargetFramework>net8.0</TargetFramework>
+            <ProjectAssetsFile>$(MSBuildThisFileDirectory).assets/project.assets.json</ProjectAssetsFile>
+          </PropertyGroup>
+          <ItemGroup>
+            <PackageReference Include="Example.Package" Version="{{version}}" />
+          </ItemGroup>
+        </Project>
+        """,
+        TestContext.Current.CancellationToken);
+
+    private static Task WriteAssetsAsync(string path, string version) => File.WriteAllTextAsync(
+        path,
+        $$"""
+        {
+          "version": 3,
+          "targets": { "net8.0": { "Example.Package/{{version}}": {} } },
+          "libraries": { "Example.Package/{{version}}": { "type": "package" } },
+          "project": { "frameworks": { "net8.0": { "dependencies": { "Example.Package": { "target": "Package", "version": "[{{version}}, )" } } } } },
+          "logs": []
+        }
+        """,
+        TestContext.Current.CancellationToken);
+
+    private static async Task RunGitAsync(string workingDirectory, params string[] arguments)
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo("git")
+            {
+                WorkingDirectory = workingDirectory,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            },
+        };
+        foreach (var argument in arguments)
+        {
+            process.StartInfo.ArgumentList.Add(argument);
+        }
+
+        process.Start();
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+        Assert.True(
+            process.ExitCode == 0,
+            $"git {string.Join(' ', arguments)} failed: {await standardError} {await standardOutput}");
     }
 
     private sealed record CliResult(int ExitCode, string Output, string Error);

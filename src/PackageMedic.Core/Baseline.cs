@@ -47,6 +47,9 @@ public sealed record BaselineComparison(
 /// </summary>
 public static class BaselineSerializer
 {
+    internal const int MaximumBaselineCharacters = 64 * 1024 * 1024;
+    internal const int MaximumBaselineEntries = 100_000;
+
     public static PackageMedicBaseline Create(AnalysisResult result, string repositoryRoot)
     {
         ArgumentNullException.ThrowIfNull(result);
@@ -119,6 +122,11 @@ public static class BaselineSerializer
     public static PackageMedicBaseline Deserialize(string json)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(json);
+        if (json.Length > MaximumBaselineCharacters)
+        {
+            throw Invalid(
+                $"The baseline exceeds the {MaximumBaselineCharacters}-character safety limit.");
+        }
 
         try
         {
@@ -128,6 +136,8 @@ public static class BaselineSerializer
             {
                 throw Invalid("The baseline root must be a JSON object.");
             }
+
+            ValidateNoDuplicateProperties(root, "$");
 
             var schemaVersion = RequiredInt32(root, "schemaVersion");
             if (schemaVersion != PackageMedicBaseline.CurrentSchemaVersion)
@@ -146,6 +156,12 @@ public static class BaselineSerializer
             var entries = new List<BaselineEntry>();
             foreach (var element in entriesElement.EnumerateArray())
             {
+                if (entries.Count >= MaximumBaselineEntries)
+                {
+                    throw Invalid(
+                        $"The baseline cannot contain more than {MaximumBaselineEntries} entries.");
+                }
+
                 if (element.ValueKind != JsonValueKind.Object)
                 {
                     throw Invalid("Every baseline entry must be a JSON object.");
@@ -175,7 +191,26 @@ public static class BaselineSerializer
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         try
         {
-            return Deserialize(File.ReadAllText(path));
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 64 * 1024,
+                FileOptions.SequentialScan);
+            if (stream.Length > MaximumBaselineCharacters)
+            {
+                throw Invalid(
+                    $"Baseline '{path}' exceeds the {MaximumBaselineCharacters}-byte safety limit.");
+            }
+
+            using var reader = new StreamReader(
+                stream,
+                Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: true,
+                bufferSize: 64 * 1024,
+                leaveOpen: false);
+            return Deserialize(reader.ReadToEnd());
         }
         catch (IOException exception)
         {
@@ -276,7 +311,16 @@ public static class BaselineSerializer
             return false;
         }
 
-        var decoded = Uri.UnescapeDataString(value);
+        string decoded;
+        try
+        {
+            decoded = Uri.UnescapeDataString(value);
+        }
+        catch (UriFormatException)
+        {
+            return false;
+        }
+
         if (decoded.Length >= 2 && char.IsAsciiLetter(decoded[0]) && decoded[1] == ':')
         {
             return false;
@@ -285,6 +329,32 @@ public static class BaselineSerializer
         return decoded
             .Split('/', StringSplitOptions.RemoveEmptyEntries)
             .All(segment => segment is not "." and not "..");
+    }
+
+    private static void ValidateNoDuplicateProperties(JsonElement element, string path)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            var names = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var property in element.EnumerateObject())
+            {
+                if (!names.Add(property.Name))
+                {
+                    throw Invalid($"Baseline contains duplicate property '{property.Name}' at {path}.");
+                }
+
+                ValidateNoDuplicateProperties(property.Value, $"{path}.{property.Name}");
+            }
+        }
+        else if (element.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var item in element.EnumerateArray())
+            {
+                ValidateNoDuplicateProperties(item, $"{path}[{index}]");
+                index++;
+            }
+        }
     }
 
     private static int RequiredInt32(JsonElement element, string name)

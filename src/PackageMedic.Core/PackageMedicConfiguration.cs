@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -30,7 +31,8 @@ public sealed record PackageMedicConfiguration(
     IReadOnlyList<string> Exclude,
     IReadOnlyDictionary<string, PolicyRule> Rules,
     IReadOnlyList<PolicySuppression> Suppressions,
-    ConfiguredPolicyTimeouts Timeouts)
+    ConfiguredPolicyTimeouts Timeouts,
+    int? MaxParallelism)
 {
     public const int CurrentSchemaVersion = 1;
 
@@ -42,7 +44,8 @@ public sealed record PackageMedicConfiguration(
         [],
         new Dictionary<string, PolicyRule>(StringComparer.Ordinal),
         [],
-        new ConfiguredPolicyTimeouts());
+        new ConfiguredPolicyTimeouts(),
+        null);
 }
 
 public sealed class PackageMedicConfigurationException : Exception
@@ -60,6 +63,10 @@ public sealed class PackageMedicConfigurationException : Exception
 
 public static class PackageMedicConfigurationLoader
 {
+    internal const int MaximumConfigurationCharacters = 1024 * 1024;
+    internal const int MaximumExcludePatterns = 1000;
+    internal const int MaximumSuppressions = 1000;
+    internal const int MaximumPatternCharacters = 4096;
     private const int MinimumTimeoutSeconds = 1;
     private const int MaximumTimeoutSeconds = 3600;
 
@@ -82,7 +89,26 @@ public static class PackageMedicConfigurationLoader
         string json;
         try
         {
-            json = File.ReadAllText(path);
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 16 * 1024,
+                FileOptions.SequentialScan);
+            if (stream.Length > MaximumConfigurationCharacters)
+            {
+                throw new PackageMedicConfigurationException(
+                    $"Invalid PackageMedic configuration '{path}': the file exceeds the {MaximumConfigurationCharacters}-byte safety limit.");
+            }
+
+            using var reader = new StreamReader(
+                stream,
+                Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: true,
+                bufferSize: 16 * 1024,
+                leaveOpen: false);
+            json = reader.ReadToEnd();
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -98,6 +124,12 @@ public static class PackageMedicConfigurationLoader
     {
         ArgumentNullException.ThrowIfNull(json);
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
+        if (json.Length > MaximumConfigurationCharacters)
+        {
+            throw Invalid(
+                sourceName,
+                $"the document exceeds the {MaximumConfigurationCharacters}-character safety limit.");
+        }
 
         RawConfiguration? raw;
         try
@@ -143,6 +175,7 @@ public static class PackageMedicConfigurationLoader
         var rules = NormalizeRules(raw.Rules, sourceName);
         var suppressions = NormalizeSuppressions(raw.Suppressions, sourceName);
         var timeouts = NormalizeTimeouts(raw.Timeouts, sourceName);
+        ValidateParallelism(raw.MaxParallelism, sourceName);
 
         return new PackageMedicConfiguration(
             raw.SchemaVersion,
@@ -152,7 +185,8 @@ public static class PackageMedicConfigurationLoader
             exclude,
             rules,
             suppressions,
-            timeouts);
+            timeouts,
+            raw.MaxParallelism);
     }
 
     private static IReadOnlyDictionary<string, PolicyRule> NormalizeRules(
@@ -199,6 +233,13 @@ public static class PackageMedicConfigurationLoader
         if (configuredSuppressions is null)
         {
             return [];
+        }
+
+        if (configuredSuppressions.Count > MaximumSuppressions)
+        {
+            throw Invalid(
+                sourceName,
+                $"suppressions cannot contain more than {MaximumSuppressions} entries.");
         }
 
         var suppressions = new List<PolicySuppression>(configuredSuppressions.Count);
@@ -254,6 +295,14 @@ public static class PackageMedicConfigurationLoader
         }
     }
 
+    private static void ValidateParallelism(int? value, string sourceName)
+    {
+        if (value is < 1 or > 32)
+        {
+            throw Invalid(sourceName, "maxParallelism must be between 1 and 32.");
+        }
+    }
+
     private static IReadOnlyList<string> NormalizePatterns(
         IReadOnlyList<string?>? patterns,
         string property,
@@ -262,6 +311,13 @@ public static class PackageMedicConfigurationLoader
         if (patterns is null)
         {
             return [];
+        }
+
+        if (patterns.Count > MaximumExcludePatterns)
+        {
+            throw Invalid(
+                sourceName,
+                $"{property} cannot contain more than {MaximumExcludePatterns} entries.");
         }
 
         var normalized = new List<string>(patterns.Count);
@@ -282,6 +338,12 @@ public static class PackageMedicConfigurationLoader
     private static string NormalizePattern(string? value, string property, string sourceName)
     {
         var normalized = RequireString(value, property, sourceName).Replace('\\', '/');
+        if (normalized.Length > MaximumPatternCharacters)
+        {
+            throw Invalid(
+                sourceName,
+                $"{property} cannot exceed {MaximumPatternCharacters} characters.");
+        }
         while (normalized.StartsWith("./", StringComparison.Ordinal))
         {
             normalized = normalized[2..];
@@ -371,6 +433,8 @@ public static class PackageMedicConfigurationLoader
         public IReadOnlyList<RawSuppression?>? Suppressions { get; init; }
 
         public RawTimeouts? Timeouts { get; init; }
+
+        public int? MaxParallelism { get; init; }
     }
 
     private sealed class RawRule

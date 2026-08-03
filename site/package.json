@@ -1,6 +1,6 @@
 {
   "name": "packagemedic-site",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "engines": {
     "node": ">=22.13.0"
@@ -8,36 +8,34 @@
   "scripts": {
     "sync-version": "node scripts/sync-version.mjs",
     "predev": "npm run sync-version",
-    "dev": "vinext dev",
+    "dev": "next dev",
     "prebuild": "npm run sync-version",
-    "build": "vinext build",
-    "prebuild:pages": "npm run sync-version",
-    "build:pages": "next build",
-    "start": "vinext start",
+    "build": "next build",
+    "build:pages": "npm run build",
     "test": "npm run build && node --test tests/rendered-html.test.mjs",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
+    "lint": "eslint .",
+    "audit:lockfile": "node scripts/verify-lockfile.mjs",
+    "audit:security": "npm audit --audit-level=low",
+    "audit:signatures": "npm audit signatures"
   },
   "dependencies": {
-    "next": "16.2.6",
-    "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "next": "16.2.12",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "1.37.1",
-    "@tailwindcss/postcss": "4.2.1",
+    "@tailwindcss/postcss": "4.3.3",
     "@types/node": "22.19.19",
-    "@types/react": "19.2.14",
-    "@types/react-dom": "19.2.3",
-    "@vitejs/plugin-react": "6.0.2",
-    "@vitejs/plugin-rsc": "0.5.26",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
     "eslint": "9.39.4",
-    "eslint-config-next": "16.2.6",
-    "react-server-dom-webpack": "19.2.6",
-    "tailwindcss": "4.2.1",
-    "typescript": "5.9.3",
-    "vinext": "0.0.50",
-    "vite": "8.0.13",
-    "wrangler": "4.92.0"
+    "eslint-config-next": "16.2.12",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "postcss": "8.5.25",
+    "sharp": "0.35.3"
   },
   "type": "module"
 }

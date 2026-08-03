@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Text;
 using System.Text.Json;
 
@@ -13,6 +14,34 @@ public static partial class SarifResultSerializer
         => Serialize(result, repositoryRoot, null);
 
     public static string Serialize(
+        AnalysisResult result,
+        string repositoryRoot,
+        BaselineComparison? baseline)
+    {
+        var buffer = new ArrayBufferWriter<byte>();
+        using (var writer = new Utf8JsonWriter(buffer, new JsonWriterOptions { Indented = true }))
+        {
+            Write(writer, result, repositoryRoot, baseline);
+        }
+
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
+    }
+
+    public static async Task SerializeAsync(
+        Stream destination,
+        AnalysisResult result,
+        string repositoryRoot,
+        BaselineComparison? baseline = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        using var writer = new Utf8JsonWriter(destination, new JsonWriterOptions { Indented = true });
+        Write(writer, result, repositoryRoot, baseline);
+        await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void Write(
+        Utf8JsonWriter writer,
         AnalysisResult result,
         string repositoryRoot,
         BaselineComparison? baseline)
@@ -41,28 +70,22 @@ public static partial class SarifResultSerializer
             .ThenBy(item => item.Diagnostic.Evidence, StringComparer.Ordinal)
             .ToArray();
 
-        using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = true }))
+        writer.WriteStartObject();
+        writer.WriteString("version", "2.1.0");
+        writer.WriteString("$schema", SchemaUri);
+        writer.WriteStartArray("runs");
+        writer.WriteStartObject();
+        WriteTool(writer, result.Version, rules);
+        writer.WriteStartArray("results");
+        foreach (var item in results)
         {
-            writer.WriteStartObject();
-            writer.WriteString("version", "2.1.0");
-            writer.WriteString("$schema", SchemaUri);
-            writer.WriteStartArray("runs");
-            writer.WriteStartObject();
-            WriteTool(writer, result.Version, rules);
-            writer.WriteStartArray("results");
-            foreach (var item in results)
-            {
-                WriteResult(writer, item, ruleIndexes);
-            }
-
-            writer.WriteEndArray();
-            writer.WriteEndObject();
-            writer.WriteEndArray();
-            writer.WriteEndObject();
+            WriteResult(writer, item, ruleIndexes);
         }
 
-        return Encoding.UTF8.GetString(stream.ToArray());
+        writer.WriteEndArray();
+        writer.WriteEndObject();
+        writer.WriteEndArray();
+        writer.WriteEndObject();
     }
 
     private static SerializableDiagnostic CreateSerializableDiagnostic(

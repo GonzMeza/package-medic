@@ -1,18 +1,42 @@
 using System.Text.RegularExpressions;
+using System.Xml;
 using System.Xml.Linq;
 
 namespace PackageMedic.Core;
 
 public sealed partial class ProjectDiscovery
 {
-    private static readonly string[] IgnoredDirectoryNames = ["bin", "obj", ".git", ".vs", "node_modules"];
+    internal const long MaximumSolutionFileBytes = 64L * 1024 * 1024;
 
-    public DiscoveryResult Discover(string? requestedPath)
+    private static readonly string[] IgnoredDirectoryNames =
+    [
+        "bin",
+        "obj",
+        ".git",
+        ".vs",
+        "node_modules",
+        "artifacts",
+        "TestResults",
+        "coverage",
+        ".next",
+        ".vinext",
+        ".wrangler",
+        "dist",
+        "out",
+    ];
+
+    public DiscoveryResult Discover(string? requestedPath, string? containmentRoot = null)
     {
         var target = Path.GetFullPath(string.IsNullOrWhiteSpace(requestedPath) ? Directory.GetCurrentDirectory() : requestedPath);
+        var boundary = containmentRoot is null ? null : Path.GetFullPath(containmentRoot);
         if (!File.Exists(target) && !Directory.Exists(target))
         {
             throw new ArgumentException($"The target path does not exist: {target}");
+        }
+
+        if (boundary is not null && !IsSafelyContained(boundary, target))
+        {
+            throw new ArgumentException("The target must resolve inside the analysis root without symbolic links or junctions.");
         }
 
         if (File.Exists(target))
@@ -26,7 +50,7 @@ public sealed partial class ProjectDiscovery
             if (extension.Equals(".sln", StringComparison.OrdinalIgnoreCase) ||
                 extension.Equals(".slnx", StringComparison.OrdinalIgnoreCase))
             {
-                var projects = ReadSolutionProjects(target);
+                var projects = ReadSolutionProjects(target, boundary);
                 if (projects.Count == 0)
                 {
                     throw new InvalidOperationException($"No C# projects were found in solution '{target}'.");
@@ -38,11 +62,15 @@ public sealed partial class ProjectDiscovery
             throw new ArgumentException("The target must be a directory, .csproj, .sln, or .slnx file.");
         }
 
-        var solutions = EnumerateFiles(target, "*.sln")
-            .Concat(EnumerateFiles(target, "*.slnx"))
+        var scan = EnumerateCandidates(target);
+        var solutions = scan.Files
+            .Where(path =>
+                Path.GetExtension(path).Equals(".sln", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetExtension(path).Equals(".slnx", StringComparison.OrdinalIgnoreCase))
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        var projectsInDirectory = EnumerateFiles(target, "*.csproj")
+        var projectsInDirectory = scan.Files
+            .Where(path => Path.GetExtension(path).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
@@ -52,19 +80,40 @@ public sealed partial class ProjectDiscovery
         }
 
         IReadOnlyList<string> restoreTargets = solutions.Length == 1 ? solutions : projectsInDirectory;
-        return new DiscoveryResult(target, solutions, projectsInDirectory, restoreTargets);
+        return new DiscoveryResult(target, solutions, projectsInDirectory, restoreTargets)
+        {
+            Errors = scan.Errors,
+        };
     }
 
-    private static IReadOnlyList<string> ReadSolutionProjects(string solutionPath)
+    private static IReadOnlyList<string> ReadSolutionProjects(string solutionPath, string? containmentRoot)
     {
         var directory = Path.GetDirectoryName(solutionPath)!;
         var projects = Path.GetExtension(solutionPath).Equals(".slnx", StringComparison.OrdinalIgnoreCase)
             ? ReadSlnxProjects(solutionPath)
             : ReadSlnProjects(solutionPath);
 
-        return projects
+        var resolved = projects
             .Select(path => Path.GetFullPath(path, directory))
-            .Where(File.Exists)
+            .ToArray();
+        if (containmentRoot is not null && resolved.FirstOrDefault(path => !IsSafelyContained(containmentRoot, path)) is { } unsafeProject)
+        {
+            throw new InvalidOperationException(
+                $"Solution '{solutionPath}' references project '{unsafeProject}' outside the safe analysis root or through a symbolic link.");
+        }
+
+        var missing = resolved
+            .Where(path => !File.Exists(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (missing.Length > 0)
+        {
+            throw new InvalidOperationException(
+                $"Solution '{solutionPath}' references missing C# project(s): {string.Join(", ", missing)}.");
+        }
+
+        return resolved
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -72,7 +121,9 @@ public sealed partial class ProjectDiscovery
 
     private static IEnumerable<string> ReadSlnProjects(string solutionPath)
     {
-        foreach (var line in File.ReadLines(solutionPath))
+        using var stream = OpenBoundedSolution(solutionPath);
+        using var reader = new StreamReader(stream);
+        while (reader.ReadLine() is { } line)
         {
             var match = SolutionProjectRegex().Match(line);
             if (match.Success && Path.GetExtension(match.Groups[1].Value).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
@@ -84,48 +135,184 @@ public sealed partial class ProjectDiscovery
 
     private static IEnumerable<string> ReadSlnxProjects(string solutionPath)
     {
-        var document = XDocument.Load(solutionPath);
-        return document.Descendants()
-            .Where(element => element.Name.LocalName.Equals("Project", StringComparison.OrdinalIgnoreCase))
-            .Select(element => (string?)element.Attribute("Path"))
-            .Where(path => !string.IsNullOrWhiteSpace(path) && Path.GetExtension(path).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
-            .Select(path => path!);
+        try
+        {
+            using var stream = OpenBoundedSolution(solutionPath);
+            using var reader = XmlReader.Create(
+                stream,
+                new XmlReaderSettings
+                {
+                    DtdProcessing = DtdProcessing.Prohibit,
+                    XmlResolver = null,
+                    MaxCharactersInDocument = MaximumSolutionFileBytes,
+                });
+            var document = XDocument.Load(reader);
+            return document.Descendants()
+                .Where(element => element.Name.LocalName.Equals("Project", StringComparison.OrdinalIgnoreCase))
+                .Select(element => (string?)element.Attribute("Path"))
+                .Where(path => !string.IsNullOrWhiteSpace(path) && Path.GetExtension(path).Equals(".csproj", StringComparison.OrdinalIgnoreCase))
+                .Select(path => path!)
+                .ToArray();
+        }
+        catch (XmlException exception)
+        {
+            throw new InvalidDataException(
+                $"Solution '{solutionPath}' is not valid safe XML: {exception.Message}",
+                exception);
+        }
     }
 
-    private static IEnumerable<string> EnumerateFiles(string root, string pattern)
+    private static FileStream OpenBoundedSolution(string solutionPath)
     {
+        var stream = new FileStream(
+            solutionPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 64 * 1024,
+            FileOptions.SequentialScan);
+        if (stream.Length <= MaximumSolutionFileBytes)
+        {
+            return stream;
+        }
+
+        stream.Dispose();
+        throw new InvalidDataException(
+            $"Solution '{solutionPath}' exceeds the {MaximumSolutionFileBytes}-byte safety limit.");
+    }
+
+    private static DiscoveryScan EnumerateCandidates(string root)
+    {
+        var candidateFiles = new List<string>();
+        var errors = new List<string>();
         var pending = new Stack<string>();
+        var visited = new HashSet<string>(
+            OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         pending.Push(root);
         while (pending.Count > 0)
         {
-            var current = pending.Pop();
-            IEnumerable<string> files;
-            IEnumerable<string> directories;
-            try
-            {
-                files = Directory.EnumerateFiles(current, pattern, SearchOption.TopDirectoryOnly);
-                directories = Directory.EnumerateDirectories(current, "*", SearchOption.TopDirectoryOnly);
-            }
-            catch (UnauthorizedAccessException)
+            var current = Path.GetFullPath(pending.Pop());
+            if (!visited.Add(current))
             {
                 continue;
             }
 
-            foreach (var file in files)
+            string[] entries;
+            try
             {
-                yield return Path.GetFullPath(file);
+                // Materialize inside the guarded block because filesystem enumeration is lazy.
+                entries = Directory.GetFileSystemEntries(current, "*", SearchOption.TopDirectoryOnly);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+            {
+                errors.Add($"Could not enumerate directory '{current}': {exception.Message}");
+                continue;
             }
 
-            foreach (var directory in directories)
+            foreach (var entry in entries)
             {
-                if (!IgnoredDirectoryNames.Contains(Path.GetFileName(directory), StringComparer.OrdinalIgnoreCase))
+                if (!TryGetAttributes(entry, out var attributes, out var error))
                 {
-                    pending.Push(directory);
+                    errors.Add(error!);
+                    continue;
                 }
+
+                if (attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    continue;
+                }
+
+                if (attributes.HasFlag(FileAttributes.Directory))
+                {
+                    if (!IgnoredDirectoryNames.Contains(Path.GetFileName(entry), StringComparer.OrdinalIgnoreCase))
+                    {
+                        pending.Push(entry);
+                    }
+
+                    continue;
+                }
+
+                var extension = Path.GetExtension(entry);
+                if (!extension.Equals(".csproj", StringComparison.OrdinalIgnoreCase) &&
+                    !extension.Equals(".sln", StringComparison.OrdinalIgnoreCase) &&
+                    !extension.Equals(".slnx", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                candidateFiles.Add(Path.GetFullPath(entry));
             }
+        }
+
+        return new DiscoveryScan(
+            candidateFiles
+                .Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+                .ToArray(),
+            errors.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
+    }
+
+    private sealed record DiscoveryScan(IReadOnlyList<string> Files, IReadOnlyList<string> Errors);
+
+    private static bool TryGetAttributes(string path, out FileAttributes attributes, out string? error)
+    {
+        try
+        {
+            attributes = File.GetAttributes(path);
+            error = null;
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            attributes = default;
+            error = $"Could not inspect filesystem entry '{path}': {exception.Message}";
+            return false;
         }
     }
 
-    [GeneratedRegex("^Project\\([^)]*\\)\\s*=\\s*\"[^\"]*\",\\s*\"([^\"]+)\"")]
+    private static bool IsReparsePoint(string path)
+    {
+        try
+        {
+            return File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        {
+            // If an entry changes or becomes inaccessible during discovery, skipping it is safer
+            // than following a path whose containment can no longer be established.
+            return true;
+        }
+    }
+
+    private static bool IsSafelyContained(string root, string candidate)
+    {
+        var normalizedRoot = Path.GetFullPath(root);
+        var normalizedCandidate = Path.GetFullPath(candidate);
+        var relative = Path.GetRelativePath(normalizedRoot, normalizedCandidate);
+        if (Path.IsPathFullyQualified(relative) ||
+            relative.Equals("..", StringComparison.Ordinal) ||
+            relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        if (relative.Equals(".", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var current = normalizedRoot;
+        foreach (var segment in relative.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (IsReparsePoint(current))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    [GeneratedRegex("^Project\\([^)]*\\)\\s*=\\s*\"[^\"]*\",\\s*\"([^\"]+)\"", RegexOptions.NonBacktracking)]
     private static partial Regex SolutionProjectRegex();
 }

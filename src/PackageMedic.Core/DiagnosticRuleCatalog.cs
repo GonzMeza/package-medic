@@ -57,6 +57,13 @@ public static class DiagnosticRuleCatalog
             "A PackageVersion, PackageReference, or VersionOverride uses a floating NuGet version that can resolve differently as packages are published.",
             $"{DiagnosticHelpBaseUri}#pm006--floatingpackageversion",
             DiagnosticSeverity.Warning),
+        new(
+            "PM007",
+            "VulnerablePackage",
+            "Package has a known vulnerability",
+            "A resolved direct or transitive NuGet package has a known vulnerability reported by the configured NuGet audit sources.",
+            $"{DiagnosticHelpBaseUri}#pm007--vulnerablepackage",
+            DiagnosticSeverity.Warning),
     ];
 
     private static readonly IReadOnlyDictionary<string, DiagnosticRuleMetadata> RulesByCode =

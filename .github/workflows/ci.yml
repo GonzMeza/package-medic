@@ -16,7 +16,9 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
       - name: Test GitHub Action helpers and metadata
         run: node --test action/tests/lib.test.mjs action/tests/metadata.test.mjs action/tests/release.test.mjs
 
@@ -28,15 +30,20 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           global-json-file: global.json
           cache: true
-          cache-dependency-path: '**/*.csproj'
-      - run: dotnet restore PackageMedic.sln
+          cache-dependency-path: '**/packages.lock.json'
+      - run: dotnet restore PackageMedic.sln --locked-mode
       - run: dotnet build PackageMedic.sln --configuration Release --no-restore
       - run: dotnet test PackageMedic.sln --configuration Release --no-build --no-restore
+      - name: Audit the repository dependency graph
+        if: matrix.os == 'ubuntu-latest'
+        run: dotnet run --project src/PackageMedic.Cli/PackageMedic.Cli.csproj --configuration Release --no-build -- audit PackageMedic.sln --no-restore --include-transitive --fail-on warning --verbosity quiet
       - run: dotnet pack src/PackageMedic.Cli/PackageMedic.Cli.csproj --configuration Release --no-build --no-restore --output artifacts/packages
       - name: Read package version
         id: package-version
@@ -62,7 +69,28 @@ jobs:
           PACKAGEMEDIC_SARIF_FILE: ${{ steps.action-smoke.outputs.sarif-file }}
           PACKAGEMEDIC_ERRORS: ${{ steps.action-smoke.outputs.errors }}
           PACKAGEMEDIC_WARNINGS: ${{ steps.action-smoke.outputs.warnings }}
-      - uses: actions/upload-artifact@v4
+      - name: Smoke-test local GitHub Action diff mode
+        id: action-diff-smoke
+        uses: ./
+        with:
+          path: fixtures/clean
+          tool-version: ${{ steps.package-version.outputs.version }}
+          nuget-source: ${{ github.workspace }}/artifacts/packages
+          restore: 'false'
+          diff-base: HEAD
+          fail-on: none
+          annotations: 'false'
+          upload-sarif: 'false'
+          upload-artifact: 'false'
+      - name: Verify Action diff reports
+        run: node action/verify-smoke.mjs
+        env:
+          PACKAGEMEDIC_EXIT_CODE: ${{ steps.action-diff-smoke.outputs.exit-code }}
+          PACKAGEMEDIC_JSON_FILE: ${{ steps.action-diff-smoke.outputs.json-file }}
+          PACKAGEMEDIC_SARIF_FILE: ${{ steps.action-diff-smoke.outputs.sarif-file }}
+          PACKAGEMEDIC_ERRORS: ${{ steps.action-diff-smoke.outputs.errors }}
+          PACKAGEMEDIC_WARNINGS: ${{ steps.action-diff-smoke.outputs.warnings }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: matrix.os == 'ubuntu-latest'
         with:
           name: PackageMedic.Tool

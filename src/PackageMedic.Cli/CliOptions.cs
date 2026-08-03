@@ -7,6 +7,8 @@ public enum CliCommand
     Help,
     Version,
     Doctor,
+    Audit,
+    Diff,
     Init,
     BaselineCreate,
     BaselineUpdate,
@@ -46,8 +48,12 @@ public sealed record CliOptions(
     int? EvaluationTimeoutSeconds = null,
     bool Force = false,
     bool DryRun = false,
+    bool AuditVulnerabilities = false,
+    bool IncludeTransitive = false,
+    string? GitReference = null,
     string? RuleCode = null,
-    bool ShowHelp = false)
+    bool ShowHelp = false,
+    int? MaxParallelism = null)
 {
     public static CliOptions Parse(IReadOnlyList<string> arguments)
     {
@@ -64,6 +70,8 @@ public sealed record CliOptions(
         return arguments[0].ToLowerInvariant() switch
         {
             "doctor" => ParseScan(arguments, 1, CliCommand.Doctor),
+            "audit" => ParseScan(arguments, 1, CliCommand.Audit),
+            "diff" => ParseDiff(arguments),
             "clean" => ParseScan(arguments, 1, CliCommand.Clean),
             "init" => ParseInit(arguments),
             "baseline" => ParseBaseline(arguments),
@@ -71,6 +79,22 @@ public sealed record CliOptions(
             "explain" => ParseExplain(arguments),
             _ => throw new UsageException($"Unknown command '{arguments[0]}'."),
         };
+    }
+
+    private static CliOptions ParseDiff(IReadOnlyList<string> arguments)
+    {
+        if (arguments.Count < 2 || arguments[1] is "--help" or "-h")
+        {
+            return new CliOptions(CliCommand.Diff, ShowHelp: true);
+        }
+
+        var reference = arguments[1].Trim();
+        if (reference.Length == 0 || reference.StartsWith("-", StringComparison.Ordinal))
+        {
+            throw new UsageException("Usage: package-medic diff <git-ref> [path] [options].");
+        }
+
+        return ParseScan(arguments, 2, CliCommand.Diff) with { GitReference = reference };
     }
 
     private static CliOptions ParseInit(IReadOnlyList<string> arguments)
@@ -155,7 +179,10 @@ public sealed record CliOptions(
         int? evaluationTimeout = null;
         var force = false;
         var dryRun = false;
+        var auditVulnerabilities = command == CliCommand.Audit;
+        var includeTransitive = false;
         var help = false;
+        int? maxParallelism = null;
 
         for (var index = start; index < arguments.Count; index++)
         {
@@ -164,6 +191,12 @@ public sealed record CliOptions(
             else if (argument == "--no-config") noConfig = true;
             else if (argument == "--force") force = true;
             else if (argument == "--dry-run") dryRun = true;
+            else if (argument == "--audit") auditVulnerabilities = true;
+            else if (argument == "--include-transitive")
+            {
+                auditVulnerabilities = true;
+                includeTransitive = true;
+            }
             else if (argument is "--help" or "-h") help = true;
             else if (TryReadOption(arguments, ref index, "--format", out var value))
                 format = ParseEnum<OutputFormat>(value, "--format", "text|json|sarif");
@@ -181,6 +214,8 @@ public sealed record CliOptions(
             else if (TryReadOption(arguments, ref index, "--baseline", out value)) baseline = NonEmpty(value, "--baseline");
             else if (TryReadOption(arguments, ref index, "--restore-timeout", out value)) restoreTimeout = PositiveInt(value, "--restore-timeout");
             else if (TryReadOption(arguments, ref index, "--evaluation-timeout", out value)) evaluationTimeout = PositiveInt(value, "--evaluation-timeout");
+            else if (TryReadOption(arguments, ref index, "--max-parallelism", out value))
+                maxParallelism = BoundedInt(value, "--max-parallelism", 1, 32);
             else if (argument.StartsWith("-", StringComparison.Ordinal)) throw Unknown(argument);
             else if (path is null) path = argument;
             else throw new UsageException("Only one target path can be specified.");
@@ -206,9 +241,9 @@ public sealed record CliOptions(
             throw new UsageException("--dry-run is only supported by 'clean'.");
         }
 
-        if (command != CliCommand.Doctor && sarifOutput is not null)
+        if (command is not (CliCommand.Doctor or CliCommand.Audit or CliCommand.Diff) && sarifOutput is not null)
         {
-            throw new UsageException("--sarif-output is only supported by 'doctor'.");
+            throw new UsageException("--sarif-output is only supported by 'doctor', 'audit', and 'diff'.");
         }
 
         if (command == CliCommand.Clean && (output is not null || format != OutputFormat.Text))
@@ -226,34 +261,25 @@ public sealed record CliOptions(
             throw new UsageException("Baseline commands always write the PackageMedic baseline JSON schema and do not accept --format.");
         }
 
-        if (force && command != CliCommand.BaselineCreate)
+        if (auditVulnerabilities && command is not (CliCommand.Doctor or CliCommand.Audit or CliCommand.Diff))
         {
-            throw new UsageException("--force is only supported by 'baseline create' and 'init'.");
+            throw new UsageException("--audit and --include-transitive are only supported by 'doctor', 'audit', and 'diff'.");
         }
 
-        if (dryRun && command != CliCommand.Clean)
+        if (command == CliCommand.Diff && baseline is not null)
         {
-            throw new UsageException("--dry-run is only supported by 'clean'.");
+            throw new UsageException("'diff' compares against its Git reference directly and does not accept --baseline.");
         }
 
-        if (command != CliCommand.Doctor && sarifOutput is not null)
+        if (command == CliCommand.Diff && failOnNew is not null)
         {
-            throw new UsageException("--sarif-output is only supported by 'doctor'.");
-        }
-
-        if (command == CliCommand.Clean && (output is not null || format != OutputFormat.Text))
-        {
-            throw new UsageException("'clean --dry-run' writes its plan to standard output and does not accept --output or --format.");
-        }
-
-        if (command == CliCommand.BaselineCreate && baseline is not null)
-        {
-            throw new UsageException("'baseline create' cannot compare against an existing --baseline.");
+            throw new UsageException("'diff' already gates only added or worsened findings and does not accept --fail-on-new.");
         }
 
         return new CliOptions(
             command, path, noRestore, format, failOn, failOnNew, verbosity, output, sarifOutput,
-            config, noConfig, baseline, restoreTimeout, evaluationTimeout, force, dryRun, ShowHelp: help);
+            config, noConfig, baseline, restoreTimeout, evaluationTimeout, force, dryRun,
+            auditVulnerabilities, includeTransitive, ShowHelp: help, MaxParallelism: maxParallelism);
     }
 
     private static bool TryReadOption(IReadOnlyList<string> arguments, ref int index, string name, out string value)
@@ -293,6 +319,11 @@ public sealed record CliOptions(
         int.TryParse(value, out var parsed) && parsed is >= 1 and <= 3600
             ? parsed
             : throw new UsageException($"Option '{option}' must be an integer between 1 and 3600 seconds.");
+
+    private static int BoundedInt(string value, string option, int minimum, int maximum) =>
+        int.TryParse(value, out var parsed) && parsed >= minimum && parsed <= maximum
+            ? parsed
+            : throw new UsageException($"Option '{option}' must be an integer between {minimum} and {maximum}.");
 
     private static UsageException Unknown(string argument) => new($"Unknown option '{argument}'.");
 }

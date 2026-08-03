@@ -27,6 +27,9 @@ public sealed record PolicyApplication(
 
 public sealed class AnalysisPolicy
 {
+    private readonly IReadOnlyList<Regex> excludeMatchers;
+    private readonly IReadOnlyDictionary<string, IReadOnlyList<PreparedSuppression>> suppressionsByRule;
+
     internal AnalysisPolicy(
         PolicyFailureLevel failOn,
         PolicyFailureLevel? failOnNew,
@@ -43,6 +46,16 @@ public sealed class AnalysisPolicy
         Rules = rules;
         Suppressions = suppressions;
         Timeouts = timeouts;
+        excludeMatchers = exclude.Select(GlobMatcher.Create).ToArray();
+        suppressionsByRule = suppressions
+            .Select(item => new PreparedSuppression(
+                item,
+                item.Path is null ? null : GlobMatcher.Create(item.Path)))
+            .GroupBy(item => item.Suppression.Rule, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => (IReadOnlyList<PreparedSuppression>)group.ToArray(),
+                StringComparer.OrdinalIgnoreCase);
     }
 
     public PolicyFailureLevel FailOn { get; }
@@ -87,10 +100,12 @@ public sealed class AnalysisPolicy
             var effectiveDiagnostic = rule?.Severity is { } severity && diagnostic.Severity != severity
                 ? diagnostic with { Severity = severity }
                 : diagnostic;
-            var suppression = Suppressions.FirstOrDefault(item => Matches(item, effectiveDiagnostic, targetRoot));
+            var suppression = suppressionsByRule.TryGetValue(effectiveDiagnostic.Code, out var candidates)
+                ? candidates.FirstOrDefault(item => Matches(item, effectiveDiagnostic, targetRoot))
+                : null;
             if (suppression is not null)
             {
-                suppressed.Add(new SuppressedDiagnostic(effectiveDiagnostic, suppression));
+                suppressed.Add(new SuppressedDiagnostic(effectiveDiagnostic, suppression.Suppression));
                 continue;
             }
 
@@ -108,11 +123,12 @@ public sealed class AnalysisPolicy
         }
 
         var normalizedPath = NormalizePath(path, targetRoot);
-        return Exclude.Any(pattern => GlobMatcher.IsMatch(normalizedPath, pattern));
+        return excludeMatchers.Any(matcher => matcher.IsMatch(normalizedPath));
     }
 
-    private static bool Matches(PolicySuppression suppression, Diagnostic diagnostic, string targetRoot)
+    private static bool Matches(PreparedSuppression prepared, Diagnostic diagnostic, string targetRoot)
     {
+        var suppression = prepared.Suppression;
         if (!suppression.Rule.Equals(diagnostic.Code, StringComparison.OrdinalIgnoreCase))
         {
             return false;
@@ -121,7 +137,7 @@ public sealed class AnalysisPolicy
         if (suppression.Path is not null)
         {
             var file = NormalizePath(diagnostic.File ?? diagnostic.Project ?? string.Empty, targetRoot);
-            if (!GlobMatcher.IsMatch(file, suppression.Path))
+            if (!prepared.PathMatcher!.IsMatch(file))
             {
                 return false;
             }
@@ -189,7 +205,7 @@ public sealed class AnalysisPolicy
     {
         private static readonly TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(100);
 
-        public static bool IsMatch(string path, string pattern)
+        public static Regex Create(string pattern)
         {
             var normalizedPattern = TrimCurrentDirectoryPrefix(pattern.Replace('\\', '/'));
             if (!normalizedPattern.Contains('/', StringComparison.Ordinal))
@@ -197,10 +213,9 @@ public sealed class AnalysisPolicy
                 normalizedPattern = $"**/{normalizedPattern}";
             }
 
-            return Regex.IsMatch(
-                path,
+            return new Regex(
                 ToRegex(normalizedPattern),
-                RegexOptions.CultureInvariant | RegexOptions.IgnoreCase,
+                RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.NonBacktracking,
                 MatchTimeout);
         }
 
@@ -240,6 +255,8 @@ public sealed class AnalysisPolicy
             return expression.Append('$').ToString();
         }
     }
+
+    private sealed record PreparedSuppression(PolicySuppression Suppression, Regex? PathMatcher);
 }
 
 public static class AnalysisPolicyResolver

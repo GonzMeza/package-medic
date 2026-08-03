@@ -21,24 +21,27 @@ jobs:
       prerelease: ${{ steps.release.outputs.prerelease }}
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           fetch-depth: 0
-      - uses: actions/setup-dotnet@v4
+          persist-credentials: false
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
         with:
           global-json-file: global.json
           cache: true
-          cache-dependency-path: '**/*.csproj'
+          cache-dependency-path: '**/packages.lock.json'
       - name: Validate tag and prepare release notes
         id: release
         run: node action/prepare-release.mjs
-      - run: dotnet restore PackageMedic.sln
+      - run: dotnet restore PackageMedic.sln --locked-mode
       - run: dotnet build PackageMedic.sln --configuration Release --no-restore
       - run: dotnet test PackageMedic.sln --configuration Release --no-build --no-restore
+      - name: Audit the repository dependency graph
+        run: dotnet run --project src/PackageMedic.Cli/PackageMedic.Cli.csproj --configuration Release --no-build -- audit PackageMedic.sln --no-restore --include-transitive --fail-on warning --verbosity quiet
       - run: dotnet pack src/PackageMedic.Cli/PackageMedic.Cli.csproj --configuration Release --no-build --no-restore --output artifacts/release
       - name: Generate SHA-256 checksum
         run: node action/checksum.mjs artifacts/release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-assets-${{ steps.release.outputs.version }}
           path: artifacts/release/
@@ -54,7 +57,7 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release-assets-${{ needs.build.outputs.version }}
           path: artifacts/release

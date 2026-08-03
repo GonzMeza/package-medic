@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Xml;
 using System.Xml.Linq;
@@ -8,6 +9,7 @@ public sealed class MsBuildProjectEvaluator
 {
     private readonly IProcessRunner processRunner;
     private readonly TimeSpan timeout;
+    private readonly SemaphoreSlim processGate;
 
     private static readonly string[] QueriedProperties =
     [
@@ -21,35 +23,54 @@ public sealed class MsBuildProjectEvaluator
     ];
 
     public MsBuildProjectEvaluator(IProcessRunner processRunner)
-        : this(processRunner, AnalysisExecutionOptions.Default.MsBuildEvaluationTimeout)
+        : this(
+            processRunner,
+            AnalysisExecutionOptions.Default.MsBuildEvaluationTimeout,
+            AnalysisExecutionOptions.Default.MaxDegreeOfParallelism)
     {
     }
 
     public MsBuildProjectEvaluator(IProcessRunner processRunner, TimeSpan timeout)
+        : this(processRunner, timeout, AnalysisExecutionOptions.Default.MaxDegreeOfParallelism)
     {
-        this.processRunner = processRunner ?? throw new ArgumentNullException(nameof(processRunner));
-        this.timeout = timeout;
     }
 
-    public async Task<EvaluatedProject> EvaluateAsync(string projectPath, CancellationToken cancellationToken)
+    public MsBuildProjectEvaluator(IProcessRunner processRunner, TimeSpan timeout, int maxDegreeOfParallelism)
     {
+        this.processRunner = processRunner ?? throw new ArgumentNullException(nameof(processRunner));
+        if (timeout <= TimeSpan.Zero || timeout == Timeout.InfiniteTimeSpan || timeout > TimeSpan.FromHours(1))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(timeout),
+                "The MSBuild evaluation timeout must be greater than zero and no longer than one hour.");
+        }
+
+        if (maxDegreeOfParallelism is < 1 or > 32)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxDegreeOfParallelism));
+        }
+
+        this.timeout = timeout;
+        processGate = new SemaphoreSlim(maxDegreeOfParallelism, maxDegreeOfParallelism);
+    }
+
+    public Task<EvaluatedProject> EvaluateAsync(string projectPath, CancellationToken cancellationToken) =>
+        EvaluateAsync(projectPath, new XmlItemLineLocator(), cancellationToken);
+
+    internal async Task<EvaluatedProject> EvaluateAsync(
+        string projectPath,
+        XmlItemLineLocator lineLocator,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(lineLocator);
         var outer = await QueryAsync(projectPath, null, cancellationToken).ConfigureAwait(false);
         var frameworks = SplitFrameworks(outer.Properties);
-        var evaluations = new List<QueryResult>();
+        IReadOnlyList<QueryResult> evaluations = frameworks.Count > 1
+            ? await Task.WhenAll(frameworks.Select(framework => QueryAsync(projectPath, framework, cancellationToken)))
+                .ConfigureAwait(false)
+            : [outer];
 
-        if (frameworks.Count > 1)
-        {
-            foreach (var framework in frameworks)
-            {
-                evaluations.Add(await QueryAsync(projectPath, framework, cancellationToken).ConfigureAwait(false));
-            }
-        }
-        else
-        {
-            evaluations.Add(outer);
-        }
-
-        var lineLocator = new XmlItemLineLocator();
+        var nearestCentralProps = FindNearestCentralProps(projectPath);
         var directPackages = new List<DirectPackageReference>();
         var centralVersions = new List<CentralPackageVersion>();
         foreach (var evaluation in evaluations)
@@ -70,7 +91,7 @@ public sealed class MsBuildProjectEvaluator
 
             foreach (var item in evaluation.PackageVersions)
             {
-                var source = GetMetadata(item, "DefiningProjectFullPath") ?? FindNearestCentralProps(projectPath) ?? projectPath;
+                var source = GetMetadata(item, "DefiningProjectFullPath") ?? nearestCentralProps ?? projectPath;
                 var id = GetMetadata(item, "Identity") ?? string.Empty;
                 var version = GetMetadata(item, "Version") ?? string.Empty;
                 var line = lineLocator.FindLine(source, "PackageVersion", id, version, occurrenceCounters);
@@ -124,25 +145,40 @@ public sealed class MsBuildProjectEvaluator
             arguments.Add($"-property:TargetFramework={targetFramework}");
         }
 
-        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(timeout);
         ProcessResult result;
+        await processGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            result = await processRunner.RunAsync(
-                "dotnet",
-                arguments,
-                Path.GetDirectoryName(projectPath)!,
-                timeoutSource.Token).ConfigureAwait(false);
+            using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutSource.CancelAfter(timeout);
+            try
+            {
+                result = await processRunner.RunAsync(
+                    "dotnet",
+                    arguments,
+                    Path.GetDirectoryName(projectPath)!,
+                    timeoutSource.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new InvalidOperationException(
+                    $"MSBuild evaluation timed out for '{projectPath}' after {timeout.TotalSeconds:0} seconds.");
+            }
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        finally
         {
-            throw new InvalidOperationException(
-                $"MSBuild evaluation timed out for '{projectPath}' after {timeout.TotalSeconds:0} seconds.");
+            processGate.Release();
         }
+
         if (result.ExitCode != 0)
         {
             throw new InvalidOperationException($"MSBuild evaluation failed for '{projectPath}': {CompactError(result)}");
+        }
+
+        if (result.StandardOutputTruncated)
+        {
+            throw new InvalidOperationException(
+                $"MSBuild evaluation output exceeded the {ProcessRunner.DefaultMaximumOutputCharacters}-character safety limit for '{projectPath}'.");
         }
 
         using var document = ParseJsonOutput(result.StandardOutput, projectPath);
@@ -274,7 +310,10 @@ public sealed record EvaluatedProject(
 
 internal sealed class XmlItemLineLocator
 {
-    private readonly Dictionary<string, IReadOnlyList<XmlItemLocation>> cache = new(StringComparer.OrdinalIgnoreCase);
+    internal const long MaximumSourceXmlBytes = 64L * 1024 * 1024;
+
+    private readonly ConcurrentDictionary<string, Lazy<IReadOnlyList<XmlItemLocation>>> cache =
+        new(StringComparer.OrdinalIgnoreCase);
 
     public int? FindLine(
         string sourceFile,
@@ -288,11 +327,11 @@ internal sealed class XmlItemLineLocator
             return null;
         }
 
-        if (!cache.TryGetValue(sourceFile, out var locations))
-        {
-            locations = ReadLocations(sourceFile);
-            cache[sourceFile] = locations;
-        }
+        var locations = cache.GetOrAdd(
+            sourceFile,
+            static file => new Lazy<IReadOnlyList<XmlItemLocation>>(
+                () => ReadLocations(file),
+                LazyThreadSafetyMode.ExecutionAndPublication)).Value;
 
         var candidates = locations.Where(item =>
             item.ItemName.Equals(itemName, StringComparison.OrdinalIgnoreCase) &&
@@ -317,7 +356,28 @@ internal sealed class XmlItemLineLocator
     {
         try
         {
-            var document = XDocument.Load(sourceFile, LoadOptions.SetLineInfo);
+            using var stream = new FileStream(
+                sourceFile,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 64 * 1024,
+                FileOptions.SequentialScan);
+            if (stream.Length > MaximumSourceXmlBytes)
+            {
+                throw new InvalidDataException(
+                    $"MSBuild source file '{sourceFile}' exceeds the {MaximumSourceXmlBytes}-byte safety limit.");
+            }
+
+            using var reader = XmlReader.Create(
+                stream,
+                new XmlReaderSettings
+                {
+                    DtdProcessing = DtdProcessing.Prohibit,
+                    XmlResolver = null,
+                    MaxCharactersInDocument = MaximumSourceXmlBytes,
+                });
+            var document = XDocument.Load(reader, LoadOptions.SetLineInfo);
             return document.Descendants()
                 .Where(element => element.Name.LocalName is "PackageReference" or "PackageVersion")
                 .Select(element => new XmlItemLocation(
@@ -329,7 +389,7 @@ internal sealed class XmlItemLineLocator
                 .Where(item => !string.IsNullOrWhiteSpace(item.Id))
                 .ToArray();
         }
-        catch (XmlException)
+        catch (Exception exception) when (exception is XmlException or IOException or InvalidDataException or UnauthorizedAccessException)
         {
             return [];
         }

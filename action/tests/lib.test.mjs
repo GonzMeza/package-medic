@@ -8,6 +8,7 @@ import {
   diagnosticsForAnnotations,
   escapeCommandData,
   escapeCommandProperty,
+  escapeMarkdown,
   isolatedName,
   normalizeActionInstance,
   parseAnnotationMode,
@@ -20,6 +21,8 @@ import {
   resolveScanPath,
   runCommand,
   validateExactVersion,
+  validateGitReference,
+  validateReportSize,
 } from '../lib.mjs';
 
 test('validates booleans and exact package versions', () => {
@@ -29,6 +32,17 @@ test('validates booleans and exact package versions', () => {
   assert.throws(() => parseBoolean('yes', 'restore'));
   assert.throws(() => validateExactVersion('0.2.*'));
   assert.throws(() => validateExactVersion('latest'));
+});
+
+test('validates optional Git references without restricting useful revision syntax', () => {
+  assert.equal(validateGitReference(''), undefined);
+  assert.equal(validateGitReference('origin/main'), 'origin/main');
+  assert.equal(validateGitReference('HEAD~2'), 'HEAD~2');
+  assert.equal(validateGitReference('8f21ac7^{commit}'), '8f21ac7^{commit}');
+  assert.throws(() => validateGitReference('--help'));
+  assert.throws(() => validateGitReference('main branch'));
+  assert.throws(() => validateGitReference('main\nnext'));
+  assert.throws(() => validateGitReference('a'.repeat(513)));
 });
 
 test('supports baseline-aware annotation modes and legacy booleans', () => {
@@ -60,6 +74,12 @@ test('streams child process output instead of buffering it in the action', () =>
 
   assert.equal(exitCode, 0);
   assert.deepEqual(receivedOptions, { windowsHide: true, stdio: 'inherit' });
+});
+
+test('rejects oversized JSON reports before reading them into action memory', () => {
+  assert.equal(validateReportSize(1024, 2048), 1024);
+  assert.throws(() => validateReportSize(2049, 2048), /safety limit/u);
+  assert.throws(() => validateReportSize(-1, 2048), /size is invalid/u);
 });
 
 test('treats pre-0.3 diagnostics as new when baseline metadata is absent', () => {
@@ -123,8 +143,14 @@ test('isolates names and paths for repeated action invocations', () => {
 });
 
 test('escapes all workflow command control characters', () => {
-  assert.equal(escapeCommandData('100%\r\nnext'), '100%25%0D%0Anext');
+  assert.equal(escapeCommandData('100%\u001b\u0000\r\nnext'), '100%25%0D%0Anext');
   assert.equal(escapeCommandProperty('a:b,c%'), 'a%3Ab%2Cc%25');
+});
+
+test('neutralizes untrusted Markdown in job summaries', () => {
+  assert.equal(
+    escapeMarkdown('[click](https://example.test)\u001b <img> | `code`'),
+    '\\[click\\](https://example.test) \\<img\\> \\| \\`code\\`');
 });
 
 test('creates safe annotations and omits files outside the workspace', () => {
@@ -171,4 +197,54 @@ test('derives counts from diagnostics instead of trusting stale summary values',
   assert.match(summary, /Threshold reached/);
   assert.match(summary, /src\\\|main/);
   assert.match(summary, /\| 2 \| 1 \| 3 \| 4 \|/);
+});
+
+test('summarizes structured Git graph changes', () => {
+  const report = {
+    target: '.',
+    summary: { projects: 1 },
+    diagnostics: [{ code: 'PM007', severity: 'error', baselineState: 'new' }],
+    analysisErrors: [],
+    diff: {
+      isComplete: true,
+      summary: { added: 1, resolved: 2, severityChanged: 3 },
+      packageChanges: [{ kind: 'versionChanged' }, { kind: 'added' }],
+      projectSettingsChanges: [{ project: 'src/App.csproj' }],
+    },
+  };
+
+  const details = reportDetails(report);
+  assert.deepEqual(details.diff, {
+    added: 1,
+    resolved: 2,
+    severityChanged: 3,
+    packageChanges: 2,
+    projectSettingsChanges: 1,
+    complete: true,
+    baselineAnalysisErrors: 0,
+    currentAnalysisErrors: 0,
+  });
+  assert.match(renderSummary(report, details, 1), /\| 1 \| 2 \| 3 \| 2 \| 1 \|/);
+});
+
+test('marks incomplete Git comparisons in the job summary', () => {
+  const report = {
+    target: '.',
+    summary: { projects: 0 },
+    diagnostics: [],
+    analysisErrors: [],
+    diff: {
+      isComplete: false,
+      summary: { added: 0, resolved: 0, severityChanged: 0 },
+      packageChanges: [],
+      projectSettingsChanges: [],
+      baselineAnalysisErrors: ['base failed'],
+      currentAnalysisErrors: ['current failed'],
+    },
+  };
+
+  const details = reportDetails(report);
+  assert.equal(details.diff.complete, false);
+  assert.match(renderSummary(report, details, 2), /Comparison incomplete/);
+  assert.match(renderSummary(report, details, 2), /1 base analysis error\(s\), 1 current analysis error\(s\)/);
 });

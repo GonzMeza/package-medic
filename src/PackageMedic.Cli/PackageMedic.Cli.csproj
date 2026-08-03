@@ -2,6 +2,7 @@
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
+    <RollForward>Major</RollForward>
     <AssemblyName>package-medic</AssemblyName>
     <RootNamespace>PackageMedic.Cli</RootNamespace>
     <PackageId>PackageMedic.Tool</PackageId>
@@ -11,8 +12,8 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>packagemedic-icon.png</PackageIcon>
     <PackageProjectUrl>https://github.com/GonzMeza/package-medic</PackageProjectUrl>
-    <PackageReleaseNotes>PackageMedic 0.3 adds team policy configuration, justified suppressions, deterministic baselines with new/existing/resolved states, fail-on-new CI gating, PM006 floating-version detection, rule discovery, bounded process execution, and read-only clean plans. Full notes: https://github.com/GonzMeza/package-medic/blob/v$(PackageMedicVersion)/CHANGELOG.md</PackageReleaseNotes>
-    <PackageTags>dotnet;nuget;dependencies;msbuild;central-package-management;dotnet-tool;sarif;github-actions;code-scanning;ci;baseline;dependency-policy</PackageTags>
+    <PackageReleaseNotes>PackageMedic 0.4 adds opt-in NuGet vulnerability auditing with PM007, direct and transitive package inventory, safe Git-reference comparisons, and matching GitHub Action controls while remaining fully read-only. Full notes: https://github.com/GonzMeza/package-medic/blob/v$(PackageMedicVersion)/CHANGELOG.md</PackageReleaseNotes>
+    <PackageTags>dotnet;nuget;dependencies;msbuild;central-package-management;dotnet-tool;sarif;github-actions;code-scanning;ci;baseline;dependency-policy;vulnerability-audit;dependency-diff</PackageTags>
     <Description>A read-only dependency doctor for SDK-style .NET projects.</Description>
     <Title>PackageMedic</Title>
   </PropertyGroup>

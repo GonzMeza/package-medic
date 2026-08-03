@@ -43,7 +43,8 @@
         "PM003": { "$ref": "#/$defs/rule" },
         "PM004": { "$ref": "#/$defs/rule" },
         "PM005": { "$ref": "#/$defs/rule" },
-        "PM006": { "$ref": "#/$defs/rule" }
+        "PM006": { "$ref": "#/$defs/rule" },
+        "PM007": { "$ref": "#/$defs/rule" }
       }
     },
     "suppressions": {
@@ -51,6 +52,12 @@
       "items": {
         "$ref": "#/$defs/suppression"
       }
+    },
+    "maxParallelism": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 32,
+      "description": "Maximum concurrent restore, vulnerability-audit, and MSBuild processes."
     },
     "timeouts": {
       "$ref": "#/$defs/timeouts"
@@ -67,7 +74,7 @@
     },
     "ruleCode": {
       "type": "string",
-      "enum": ["PM001", "PM002", "PM003", "PM004", "PM005", "PM006"]
+      "enum": ["PM001", "PM002", "PM003", "PM004", "PM005", "PM006", "PM007"]
     },
     "rule": {
       "type": "object",

@@ -4,11 +4,25 @@ import { realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const exactNuGetVersion = /^\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
+export const maximumJsonReportBytes = 256 * 1024 * 1024;
 
 export function runCommand(executable, args, spawn = spawnSync) {
   const result = spawn(executable, args, { windowsHide: true, stdio: 'inherit' });
   if (result.error) throw result.error;
   return Number.isInteger(result.status) ? result.status : 2;
+}
+
+export function validateReportSize(size, maximum = maximumJsonReportBytes) {
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error('PackageMedic JSON report size is invalid.');
+  }
+  if (!Number.isSafeInteger(maximum) || maximum < 1) {
+    throw new Error('PackageMedic JSON report limit is invalid.');
+  }
+  if (size > maximum) {
+    throw new Error(`PackageMedic JSON report exceeds the ${maximum}-byte safety limit.`);
+  }
+  return size;
 }
 
 export function parseBoolean(value, name) {
@@ -29,9 +43,18 @@ export function parseAnnotationMode(value) {
 export function validateExactVersion(value) {
   const version = String(value ?? '').trim();
   if (!exactNuGetVersion.test(version) || version.includes('*')) {
-    throw new Error('tool-version must be an exact NuGet version, for example 0.3.0.');
+    throw new Error('tool-version must be an exact NuGet version, for example 0.4.0.');
   }
   return version;
+}
+
+export function validateGitReference(value) {
+  const reference = String(value ?? '').trim();
+  if (!reference) return undefined;
+  if (reference.length > 512 || reference.startsWith('-') || /[\u0000-\u0020\u007f]/u.test(reference)) {
+    throw new Error('diff-base must be a Git reference without whitespace, control characters, or a leading hyphen.');
+  }
+  return reference;
 }
 
 export function enumValue(value, name, allowed) {
@@ -149,11 +172,24 @@ export function resolveNugetSource(workspace, runnerTemp, input) {
 }
 
 export function escapeCommandData(value) {
-  return String(value ?? '').replaceAll('%', '%25').replaceAll('\r', '%0D').replaceAll('\n', '%0A');
+  return String(value ?? '')
+    .replaceAll(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replaceAll('%', '%25')
+    .replaceAll('\r', '%0D')
+    .replaceAll('\n', '%0A');
 }
 
 export function escapeCommandProperty(value) {
   return escapeCommandData(value).replaceAll(':', '%3A').replaceAll(',', '%2C');
+}
+
+export function escapeMarkdown(value) {
+  return String(value ?? '')
+    .replaceAll(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
+    .replaceAll('\\', '\\\\')
+    .replaceAll(/([`*_[\]<>|])/g, '\\$1')
+    .replaceAll('\r', ' ')
+    .replaceAll('\n', ' ');
 }
 
 function safeRelativeFile(workspace, value) {
@@ -230,7 +266,20 @@ export function reportDetails(report) {
   };
   const suppressed = count(report.policy?.suppressed ?? suppressedDiagnostics.length);
 
-  return { counts, diagnostics: report.diagnostics, baseline, suppressed, suppressedDiagnostics };
+  const diff = report.diff && typeof report.diff === 'object'
+    ? {
+        added: count(report.diff.summary?.added),
+        resolved: count(report.diff.summary?.resolved),
+        severityChanged: count(report.diff.summary?.severityChanged),
+        packageChanges: Array.isArray(report.diff.packageChanges) ? report.diff.packageChanges.length : 0,
+        projectSettingsChanges: Array.isArray(report.diff.projectSettingsChanges) ? report.diff.projectSettingsChanges.length : 0,
+        complete: report.diff.isComplete !== false,
+        baselineAnalysisErrors: Array.isArray(report.diff.baselineAnalysisErrors) ? report.diff.baselineAnalysisErrors.length : 0,
+        currentAnalysisErrors: Array.isArray(report.diff.currentAnalysisErrors) ? report.diff.currentAnalysisErrors.length : 0,
+      }
+    : undefined;
+
+  return { counts, diagnostics: report.diagnostics, baseline, suppressed, suppressedDiagnostics, diff };
 }
 
 export function diagnosticsForAnnotations(details, mode) {
@@ -244,7 +293,7 @@ export function diagnosticsForAnnotations(details, mode) {
 }
 
 function markdownCell(value) {
-  return String(value ?? '').replaceAll('|', '\\|').replaceAll('\r', ' ').replaceAll('\n', ' ');
+  return escapeMarkdown(value);
 }
 
 export function renderSummary(report, details, exitCode, workspace = process.cwd()) {
@@ -252,7 +301,7 @@ export function renderSummary(report, details, exitCode, workspace = process.cwd
   const target = markdownCell(safeRelativeFile(workspace, report?.target) || 'Repository');
   const projects = Number(report?.summary?.projects ?? 0);
   const analysisErrors = Array.isArray(report?.analysisErrors) ? report.analysisErrors.length : 0;
-  return [
+  const summary = [
     '## PackageMedic',
     '',
     `**${status}** — exit code \`${exitCode}\``,
@@ -267,5 +316,23 @@ export function renderSummary(report, details, exitCode, workspace = process.cwd
     '',
     'Reports are available in the action outputs and, when enabled, the workflow artifact.',
     '',
-  ].join('\n');
+  ];
+  if (details.diff) {
+    if (!details.diff.complete) {
+      summary.splice(
+        summary.length - 2,
+        0,
+        `**Comparison incomplete** — ${details.diff.baselineAnalysisErrors} base analysis error(s), ${details.diff.currentAnalysisErrors} current analysis error(s).`,
+        '');
+    }
+    summary.splice(
+      summary.length - 2,
+      0,
+      '| Added findings | Resolved findings | Severity changed | Package changes | CPM changes |',
+      '| ---: | ---: | ---: | ---: | ---: |',
+      `| ${details.diff.added} | ${details.diff.resolved} | ${details.diff.severityChanged} | ${details.diff.packageChanges} | ${details.diff.projectSettingsChanges} |`,
+      '');
+  }
+
+  return summary.join('\n');
 }

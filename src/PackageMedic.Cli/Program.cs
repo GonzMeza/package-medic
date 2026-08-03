@@ -4,6 +4,8 @@ namespace PackageMedic.Cli;
 
 public static class Program
 {
+    private static readonly byte[] NewLineUtf8 = [(byte)'\n'];
+
     public static Task<int> Main(string[] args) => ExecuteAsync(args, Console.Out, Console.Error, CancellationToken.None);
 
     public static async Task<int> ExecuteAsync(
@@ -41,7 +43,9 @@ public static class Program
                 CliCommand.BaselineCreate or CliCommand.BaselineUpdate =>
                     await WriteBaselineAsync(options, output, error, cancellationToken).ConfigureAwait(false),
                 CliCommand.Clean => await WriteCleanPlanAsync(options, output, error, cancellationToken).ConfigureAwait(false),
-                CliCommand.Doctor => await RunDoctorAsync(options, output, error, cancellationToken).ConfigureAwait(false),
+                CliCommand.Doctor or CliCommand.Audit =>
+                    await RunDoctorAsync(options, output, error, cancellationToken).ConfigureAwait(false),
+                CliCommand.Diff => await RunDiffAsync(options, output, error, cancellationToken).ConfigureAwait(false),
                 _ => throw new UsageException("A command is required."),
             };
         }
@@ -52,6 +56,7 @@ public static class Program
         }
         catch (Exception exception) when (exception is
             ArgumentException or
+            System.ComponentModel.Win32Exception or
             InvalidDataException or
             InvalidOperationException or
             UnauthorizedAccessException or
@@ -72,34 +77,13 @@ public static class Program
     {
         ValidateOutputPaths(options);
         var prepared = await AnalyzeAsync(options, error, cancellationToken).ConfigureAwait(false);
-        var rendered = await RenderResultAsync(prepared, options).ConfigureAwait(false);
-        var additionalSarif = options.SarifOutputPath is null
-            ? null
-            : options.Format == OutputFormat.Sarif
-                ? rendered
-                : RenderSarif(prepared);
-
-        if (additionalSarif is not null)
-        {
-            await AtomicOutputFile.WriteAsync(options.SarifOutputPath!, additionalSarif, cancellationToken).ConfigureAwait(false);
-            if (options.Verbosity != OutputVerbosity.Quiet)
-            {
-                await error.WriteLineAsync($"Wrote sarif report to {options.SarifOutputPath}").ConfigureAwait(false);
-            }
-        }
-
-        if (options.OutputPath is null)
-        {
-            await output.WriteAsync(rendered).ConfigureAwait(false);
-        }
-        else
-        {
-            await AtomicOutputFile.WriteAsync(options.OutputPath, rendered, cancellationToken).ConfigureAwait(false);
-            if (options.Verbosity != OutputVerbosity.Quiet)
-            {
-                await error.WriteLineAsync($"Wrote {options.Format.ToString().ToLowerInvariant()} report to {options.OutputPath}").ConfigureAwait(false);
-            }
-        }
+        await WriteAnalysisReportsAsync(
+            prepared,
+            options,
+            output,
+            error,
+            null,
+            cancellationToken).ConfigureAwait(false);
 
         if (prepared.HasOperationalError)
         {
@@ -114,6 +98,187 @@ public static class Program
                          ReachesThreshold(newDiagnostics, failOnNew);
         return allReached || newReached ? 1 : 0;
     }
+
+    private static async Task<int> RunDiffAsync(
+        CliOptions options,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        ValidateOutputPaths(options);
+        var currentRepositoryRoot = FindRepositoryRoot(options.Path);
+        var currentTarget = Path.GetFullPath(options.Path ?? Directory.GetCurrentDirectory());
+        EnsureWithinRepository(currentTarget, currentRepositoryRoot, "The diff target");
+        if (options.NoRestore && options.Verbosity != OutputVerbosity.Quiet)
+        {
+            await error.WriteLineAsync(
+                "warning: diff --no-restore requires usable assets files to be tracked in both the current tree and Git reference.")
+                .ConfigureAwait(false);
+        }
+
+        var processRunner = new ProcessRunner();
+        using var snapshot = await new GitSnapshotProvider(processRunner)
+            .MaterializeAsync(currentRepositoryRoot, options.GitReference!, cancellationToken)
+            .ConfigureAwait(false);
+        var relativeTarget = Path.GetRelativePath(currentRepositoryRoot, currentTarget);
+        var snapshotTarget = Path.GetFullPath(Path.Combine(snapshot.SnapshotDirectory, relativeTarget));
+        EnsureWithinRepository(snapshotTarget, snapshot.SnapshotDirectory, "The snapshot target");
+        if (!File.Exists(snapshotTarget) && !Directory.Exists(snapshotTarget))
+        {
+            throw new InvalidOperationException(
+                $"The target '{ToPortableDisplayPath(currentTarget, currentRepositoryRoot)}' does not exist in Git reference '{options.GitReference}'.");
+        }
+
+        var current = await AnalyzeAsync(options, error, cancellationToken, currentRepositoryRoot).ConfigureAwait(false);
+        var baselineOptions = options with
+        {
+            Path = snapshotTarget,
+            OutputPath = null,
+            SarifOutputPath = null,
+            BaselinePath = null,
+            FailOnNew = null,
+            GitReference = null,
+        };
+        var baseline = await AnalyzeAsync(
+            baselineOptions,
+            error,
+            cancellationToken,
+            snapshot.SnapshotDirectory).ConfigureAwait(false);
+        var comparison = AnalysisDiffComparer.Compare(
+            baseline.Result,
+            snapshot.SnapshotDirectory,
+            current.Result,
+            currentRepositoryRoot,
+            snapshot.Reference,
+            snapshot.Commit);
+
+        var gateFingerprints = comparison.Changes
+            .Where(change => change.Kind == DiagnosticChangeKind.Added ||
+                             change.Kind == DiagnosticChangeKind.SeverityChanged &&
+                             change.After!.Severity > change.Before!.Severity)
+            .Select(change => change.Fingerprint)
+            .ToHashSet(StringComparer.Ordinal);
+        var gateDiagnostics = current.Result.Diagnostics
+            .Where(diagnostic => gateFingerprints.Contains(
+                DiagnosticFingerprint.Compute(diagnostic, currentRepositoryRoot)))
+            .ToArray();
+        var diffResult = current.Result with
+        {
+            Diagnostics = gateDiagnostics,
+            Summary = Recount(current.Result.Summary, gateDiagnostics),
+        };
+        var diffBaseline = BaselineMatcher.Compare(
+            diffResult,
+            new PackageMedicBaseline(PackageMedicBaseline.CurrentSchemaVersion, diffResult.Version, []),
+            currentRepositoryRoot);
+        var diffPrepared = current with
+        {
+            Result = diffResult,
+            Context = current.Context with { Baseline = diffBaseline, BaselineFile = null },
+        };
+        await WriteAnalysisReportsAsync(
+            diffPrepared,
+            options,
+            output,
+            error,
+            comparison,
+            cancellationToken).ConfigureAwait(false);
+
+        if (!comparison.IsComplete || current.HasOperationalError || baseline.HasOperationalError)
+        {
+            return 2;
+        }
+
+        return ReachesThreshold(gateDiagnostics, current.Context.Policy.FailOn) ? 1 : 0;
+    }
+
+    private static async Task WriteAnalysisReportsAsync(
+        PreparedAnalysis prepared,
+        CliOptions options,
+        TextWriter output,
+        TextWriter error,
+        AnalysisDiffReport? diff,
+        CancellationToken cancellationToken)
+    {
+        if (options.SarifOutputPath is not null)
+        {
+            await WriteSarifFileAsync(options.SarifOutputPath, prepared, cancellationToken).ConfigureAwait(false);
+            if (options.Verbosity != OutputVerbosity.Quiet)
+            {
+                await error.WriteLineAsync($"Wrote sarif report to {options.SarifOutputPath}").ConfigureAwait(false);
+            }
+        }
+
+        if (options.OutputPath is null)
+        {
+            var rendered = options.Format switch
+            {
+                OutputFormat.Json => ResultJsonSerializer.Serialize(prepared.Result, prepared.Context, diff) + "\n",
+                OutputFormat.Sarif => RenderSarif(prepared),
+                _ when diff is not null => AnalysisDiffSerializer.SerializeText(diff),
+                _ => await RenderResultAsync(prepared, options).ConfigureAwait(false),
+            };
+            await output.WriteAsync(rendered).ConfigureAwait(false);
+        }
+        else
+        {
+            if (options.Format == OutputFormat.Json)
+            {
+                await WriteJsonFileAsync(options.OutputPath, prepared, diff, cancellationToken).ConfigureAwait(false);
+            }
+            else if (options.Format == OutputFormat.Sarif)
+            {
+                await WriteSarifFileAsync(options.OutputPath, prepared, cancellationToken).ConfigureAwait(false);
+            }
+            else
+            {
+                var rendered = diff is null
+                    ? await RenderResultAsync(prepared, options).ConfigureAwait(false)
+                    : AnalysisDiffSerializer.SerializeText(diff);
+                await AtomicOutputFile.WriteAsync(options.OutputPath, rendered, cancellationToken).ConfigureAwait(false);
+            }
+
+            if (options.Verbosity != OutputVerbosity.Quiet)
+            {
+                await error.WriteLineAsync($"Wrote {options.Format.ToString().ToLowerInvariant()} report to {options.OutputPath}").ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static Task WriteJsonFileAsync(
+        string path,
+        PreparedAnalysis prepared,
+        AnalysisDiffReport? diff,
+        CancellationToken cancellationToken) => AtomicOutputFile.WriteAsync(
+        path,
+        async (stream, token) =>
+        {
+            await ResultJsonSerializer.SerializeAsync(
+                stream,
+                prepared.Result,
+                prepared.Context,
+                diff,
+                token).ConfigureAwait(false);
+            await stream.WriteAsync(NewLineUtf8, token).ConfigureAwait(false);
+        },
+        cancellationToken);
+
+    private static Task WriteSarifFileAsync(
+        string path,
+        PreparedAnalysis prepared,
+        CancellationToken cancellationToken) => AtomicOutputFile.WriteAsync(
+        path,
+        async (stream, token) =>
+        {
+            await SarifResultSerializer.SerializeAsync(
+                stream,
+                prepared.Result,
+                prepared.Context.RepositoryRoot,
+                prepared.Context.Baseline,
+                token).ConfigureAwait(false);
+            await stream.WriteAsync(NewLineUtf8, token).ConfigureAwait(false);
+        },
+        cancellationToken);
 
     private static async Task<int> WriteBaselineAsync(
         CliOptions options,
@@ -197,16 +362,17 @@ public static class Program
             await output.WriteLineAsync($"Would review/remove: {diagnostic.Evidence} ({location})").ConfigureAwait(false);
         }
 
-        await output.WriteLineAsync($"Plan: {candidates.Length} candidate(s); apply is intentionally unavailable in 0.3.").ConfigureAwait(false);
+        await output.WriteLineAsync($"Plan: {candidates.Length} candidate(s); apply is intentionally unavailable in 0.4.").ConfigureAwait(false);
         return 0;
     }
 
     private static async Task<PreparedAnalysis> AnalyzeAsync(
         CliOptions options,
         TextWriter error,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? repositoryRootOverride = null)
     {
-        var repositoryRoot = FindRepositoryRoot(options.Path);
+        var repositoryRoot = repositoryRootOverride ?? FindRepositoryRoot(options.Path);
         var (configuration, configurationPath, configurationDirectory) = LoadConfiguration(options, repositoryRoot);
         var baselineOverride = options.BaselinePath is null ? null : Path.GetFullPath(options.BaselinePath);
         var policy = AnalysisPolicyResolver.Resolve(
@@ -218,14 +384,55 @@ public static class Program
                 baselineOverride,
                 options.RestoreTimeoutSeconds,
                 options.EvaluationTimeoutSeconds));
-        var executionOptions = new AnalysisExecutionOptions(policy.Timeouts.Restore, policy.Timeouts.Evaluation);
+        var executionOptions = new AnalysisExecutionOptions(
+            policy.Timeouts.Restore,
+            policy.Timeouts.Evaluation,
+            options.MaxParallelism ?? configuration.MaxParallelism);
         var analyzer = new PackageMedicAnalyzer(new ProcessRunner(), executionOptions);
         Action<string>? progress = options.Verbosity == OutputVerbosity.Quiet
             ? null
             : message => error.WriteLine(message);
-        var outcome = await analyzer.AnalyzeAsync(options.Path, options.NoRestore, progress, cancellationToken).ConfigureAwait(false);
+        var outcome = await analyzer.AnalyzeAsync(
+            options.Path,
+            options.NoRestore,
+            progress,
+            cancellationToken,
+            repositoryRoot).ConfigureAwait(false);
 
-        repositoryRoot = FindRepositoryRoot(outcome.Result.Target);
+        if (options.AuditVulnerabilities)
+        {
+            var discovered = new ProjectDiscovery().Discover(options.Path, repositoryRoot);
+            var audit = await new VulnerabilityAuditRunner(
+                    new ProcessRunner(),
+                    policy.Timeouts.Restore,
+                    executionOptions.MaxDegreeOfParallelism)
+                .AuditAsync(discovered, options.IncludeTransitive, progress, cancellationToken)
+                .ConfigureAwait(false);
+            var auditDiagnostics = outcome.Result.Diagnostics.Concat(audit.Diagnostics)
+                .DistinctBy(item => $"{item.Code}|{item.OriginalCode}|{item.Project}|{item.File}|{item.Line}|{item.Evidence}", StringComparer.Ordinal)
+                .OrderByDescending(item => item.Severity)
+                .ThenBy(item => item.Code, StringComparer.Ordinal)
+                .ThenBy(item => item.Project, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(item => item.File, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(item => item.Line)
+                .ThenBy(item => item.Evidence, StringComparer.Ordinal)
+                .ToArray();
+            var auditErrors = outcome.Result.AnalysisErrors.Concat(audit.Errors)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            outcome = new AnalysisOutcome(
+                outcome.Result with
+                {
+                    Diagnostics = auditDiagnostics,
+                    Summary = Recount(outcome.Result.Summary, auditDiagnostics),
+                    AnalysisErrors = auditErrors,
+                    Vulnerabilities = audit.Vulnerabilities,
+                },
+                outcome.HasOperationalError || audit.HasOperationalError);
+        }
+
+        repositoryRoot = repositoryRootOverride ?? FindRepositoryRoot(outcome.Result.Target);
         var application = policy.Apply(outcome.Result.Diagnostics, repositoryRoot);
         var result = outcome.Result with
         {
@@ -445,6 +652,17 @@ public static class Program
         Path.GetFullPath(right),
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
+    private static void EnsureWithinRepository(string path, string repositoryRoot, string description)
+    {
+        var relative = Path.GetRelativePath(Path.GetFullPath(repositoryRoot), Path.GetFullPath(path));
+        if (Path.IsPathFullyQualified(relative) ||
+            relative.Equals("..", StringComparison.Ordinal) ||
+            relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+        {
+            throw new ArgumentException($"{description} must be inside the Git repository.");
+        }
+    }
+
     private static string DefaultConfiguration =>
         """
         {
@@ -462,6 +680,7 @@ public static class Program
             }
           },
           "suppressions": [],
+          "maxParallelism": 4,
           "timeouts": {
             "restoreSeconds": 300,
             "evaluationSeconds": 60
@@ -474,6 +693,8 @@ public static class Program
 
         Usage:
           package-medic doctor [path] [options]
+          package-medic audit [path] [options]
+          package-medic diff <git-ref> [path] [options]
           package-medic init [directory|file] [--force]
           package-medic baseline create [path] --output <file> [options]
           package-medic baseline update [path] [--baseline <file>] [--output <file>] [options]
@@ -490,6 +711,7 @@ public static class Program
           --restore-timeout <seconds>  Restore timeout, 1-3600
           --evaluation-timeout <seconds>
                                        Per-MSBuild evaluation timeout, 1-3600
+          --max-parallelism <1-32>     Maximum concurrent restore, audit, and MSBuild processes
           --verbosity quiet|normal|detailed
 
         Doctor report and gate options:
@@ -499,13 +721,21 @@ public static class Program
           --fail-on none|warning|error Fail on any effective diagnostic
           --fail-on-new none|warning|error
                                        Fail only on diagnostics absent from baseline
+          --audit                      Include official NuGet vulnerability audit data
+          --include-transitive         Audit direct and transitive packages
+
+        Diff behavior:
+          Compares the working tree with a safely materialized Git reference.
+          Reports added/resolved/worsened findings, package versions, and CPM changes.
+          --baseline and --fail-on-new are intentionally not accepted by diff.
+          --no-restore requires usable assets files tracked in both compared trees.
 
         Exit codes:
           0  Analysis completed below the configured thresholds
           1  A configured diagnostic threshold was reached
           2  Usage, restore, configuration, or analysis error
 
-        PackageMedic 0.3 remains read-only. clean only supports --dry-run.
+        PackageMedic 0.4 remains read-only. clean only supports --dry-run.
         """;
 
     private sealed record PreparedAnalysis(

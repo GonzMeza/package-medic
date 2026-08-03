@@ -32,9 +32,9 @@ public sealed class SarifResultSerializerTests
 
         Assert.Equal("PackageMedic", driver.GetProperty("name").GetString());
         Assert.Equal("0.2.0", driver.GetProperty("semanticVersion").GetString());
-        Assert.Equal(["PM001", "PM002", "PM003", "PM004", "PM005", "PM006"], rules.Select(RuleId).ToArray());
+        Assert.Equal(["PM001", "PM002", "PM003", "PM004", "PM005", "PM006", "PM007"], rules.Select(RuleId).ToArray());
         Assert.Equal(
-            ["warning", "warning", "warning", "error", "warning", "warning"],
+            ["warning", "warning", "warning", "error", "warning", "warning", "warning"],
             rules.Select(rule => rule.GetProperty("defaultConfiguration").GetProperty("level").GetString()!).ToArray());
         Assert.All(rules, rule =>
         {
@@ -48,7 +48,7 @@ public sealed class SarifResultSerializerTests
         });
 
         Assert.Equal(
-            ["PM001", "PM002", "PM003", "PM004", "PM005", "PM006"],
+            ["PM001", "PM002", "PM003", "PM004", "PM005", "PM006", "PM007"],
             DiagnosticRuleCatalog.All.Select(rule => rule.Code).ToArray());
     }
 

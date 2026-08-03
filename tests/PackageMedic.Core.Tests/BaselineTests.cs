@@ -182,8 +182,30 @@ public sealed class BaselineTests
         }
     }
 
+    [Fact]
+    public void LoadRejectsOversizedBaselineBeforeReadingItIntoMemory()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"packagemedic-baseline-{Guid.NewGuid():N}.json");
+        try
+        {
+            using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                stream.SetLength(BaselineSerializer.MaximumBaselineCharacters + 1L);
+            }
+
+            var exception = Assert.Throws<InvalidDataException>(() => BaselineSerializer.Load(path));
+
+            Assert.Contains("safety limit", exception.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData("{\"schemaVersion\":2,\"toolVersion\":\"0.3.0\",\"entries\":[]}", "schemaVersion")]
+    [InlineData("{\"schemaVersion\":1,\"schemaVersion\":1,\"toolVersion\":\"0.3.0\",\"entries\":[]}", "duplicate property")]
     [InlineData("{\"schemaVersion\":1,\"toolVersion\":\"0.3.0\",\"entries\":{}}", "entries")]
     [InlineData("{\"schemaVersion\":1,\"toolVersion\":\"0.3.0\",\"entries\":[{\"fingerprint\":\"bad\",\"ruleId\":\"PM001\",\"severity\":\"warning\",\"title\":\"Bad\"}]}", "fingerprint")]
     [InlineData("{\"schemaVersion\":1,\"toolVersion\":\"0.3.0\",\"entries\":[{\"fingerprint\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"ruleId\":\"PM001\",\"severity\":\"warning\",\"title\":\"Bad\",\"file\":\"../secret.props\"}]}", "repository-relative")]

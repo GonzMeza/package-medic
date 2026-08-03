@@ -4,6 +4,8 @@ namespace PackageMedic.Core;
 
 public sealed class AssetsFileReader
 {
+    internal const long MaximumAssetsFileBytes = 512L * 1024 * 1024;
+
     public AssetsReadResult Read(string assetsFile, string projectPath)
     {
         if (!File.Exists(assetsFile))
@@ -13,14 +15,29 @@ public sealed class AssetsFileReader
                 assetsFile);
         }
 
-        using var document = JsonDocument.Parse(File.ReadAllText(assetsFile));
+        using var stream = new FileStream(
+            assetsFile,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 64 * 1024,
+            FileOptions.SequentialScan);
+        if (stream.Length > MaximumAssetsFileBytes)
+        {
+            throw new InvalidDataException(
+                $"NuGet assets file for '{projectPath}' exceeds the {MaximumAssetsFileBytes}-byte safety limit.");
+        }
+
+        using var document = JsonDocument.Parse(stream);
         var root = document.RootElement;
         var libraries = ReadPackageLibraries(root);
-        var resolved = ReadResolvedPackages(root, libraries);
-        var direct = ReadDirectDependencies(root);
+        var directByFramework = ReadDirectDependencies(root);
+        var inventory = ReadPackageInventory(root, libraries, directByFramework, projectPath);
+        var resolved = inventory.Select(item => item.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var direct = directByFramework.Values.SelectMany(item => item).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var transitive = resolved.Where(id => !direct.Contains(id)).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var diagnostics = ReadLogs(root, projectPath);
-        return new AssetsReadResult(resolved, transitive, diagnostics);
+        return new AssetsReadResult(resolved, transitive, diagnostics, inventory);
     }
 
     private static HashSet<string> ReadPackageLibraries(JsonElement root)
@@ -42,9 +59,13 @@ public sealed class AssetsFileReader
         return packages;
     }
 
-    private static HashSet<string> ReadResolvedPackages(JsonElement root, IReadOnlySet<string> packageLibraries)
+    private static IReadOnlyList<PackageInventoryItem> ReadPackageInventory(
+        JsonElement root,
+        IReadOnlySet<string> packageLibraries,
+        IReadOnlyDictionary<string, HashSet<string>> directByFramework,
+        string projectPath)
     {
-        var packages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var packages = new List<PackageInventoryItem>();
         if (!root.TryGetProperty("targets", out var targets))
         {
             return packages;
@@ -52,22 +73,44 @@ public sealed class AssetsFileReader
 
         foreach (var target in targets.EnumerateObject())
         {
+            var targetParts = target.Name.Split('/', 2);
+            var framework = targetParts[0];
+            var runtimeIdentifier = targetParts.Length == 2 ? targetParts[1] : null;
+            var direct = ResolveDirectPackages(framework, directByFramework);
             foreach (var library in target.Value.EnumerateObject())
             {
-                var id = SplitLibraryKey(library.Name);
+                var (id, version) = SplitLibraryIdentity(library.Name);
                 if (packageLibraries.Contains(id))
                 {
-                    packages.Add(id);
+                    packages.Add(new PackageInventoryItem(
+                        projectPath,
+                        framework,
+                        id,
+                        version,
+                        direct.Contains(id) ? PackageDependencyKind.Direct : PackageDependencyKind.Transitive,
+                        null,
+                        "resolved",
+                        runtimeIdentifier));
                 }
             }
         }
 
-        return packages;
+        return packages
+            .DistinctBy(
+                item => $"{item.Project}|{item.Framework}|{item.RuntimeIdentifier}|{item.Id}|{item.ResolvedVersion}|{item.DependencyKind}",
+                StringComparer.OrdinalIgnoreCase)
+            .OrderBy(item => item.Project, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.Framework, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.RuntimeIdentifier, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.DependencyKind)
+            .ThenBy(item => item.Id, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(item => item.ResolvedVersion, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
-    private static HashSet<string> ReadDirectDependencies(JsonElement root)
+    private static Dictionary<string, HashSet<string>> ReadDirectDependencies(JsonElement root)
     {
-        var packages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var packages = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
         if (!root.TryGetProperty("project", out var project) ||
             !project.TryGetProperty("frameworks", out var frameworks))
         {
@@ -76,6 +119,8 @@ public sealed class AssetsFileReader
 
         foreach (var framework in frameworks.EnumerateObject())
         {
+            var frameworkPackages = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            packages[framework.Name] = frameworkPackages;
             if (!framework.Value.TryGetProperty("dependencies", out var dependencies))
             {
                 continue;
@@ -83,11 +128,25 @@ public sealed class AssetsFileReader
 
             foreach (var dependency in dependencies.EnumerateObject())
             {
-                packages.Add(dependency.Name);
+                frameworkPackages.Add(dependency.Name);
             }
         }
 
         return packages;
+    }
+
+    private static IReadOnlySet<string> ResolveDirectPackages(
+        string targetFramework,
+        IReadOnlyDictionary<string, HashSet<string>> directByFramework)
+    {
+        if (directByFramework.TryGetValue(targetFramework, out var exact))
+        {
+            return exact;
+        }
+
+        return directByFramework.Values
+            .SelectMany(item => item)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
     private static IReadOnlyList<Diagnostic> ReadLogs(JsonElement root, string projectPath)
@@ -131,6 +190,14 @@ public sealed class AssetsFileReader
         return separator > 0 ? key[..separator] : key;
     }
 
+    private static (string Id, string Version) SplitLibraryIdentity(string key)
+    {
+        var separator = key.LastIndexOf('/');
+        return separator > 0
+            ? (key[..separator], key[(separator + 1)..])
+            : (key, "unknown");
+    }
+
     private static string GetString(JsonElement element, string name) =>
         element.TryGetProperty(name, out var value) ? value.ToString() : string.Empty;
 
@@ -141,4 +208,5 @@ public sealed class AssetsFileReader
 public sealed record AssetsReadResult(
     IReadOnlySet<string> ResolvedPackages,
     IReadOnlySet<string> TransitivePackages,
-    IReadOnlyList<Diagnostic> Diagnostics);
+    IReadOnlyList<Diagnostic> Diagnostics,
+    IReadOnlyList<PackageInventoryItem> PackageInventory);

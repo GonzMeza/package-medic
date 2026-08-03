@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import process from 'node:process';
@@ -7,6 +7,7 @@ import {
   diagnosticsForAnnotations,
   enumValue,
   escapeCommandData,
+  escapeMarkdown,
   isolatedName,
   isWithin,
   normalizeActionInstance,
@@ -20,6 +21,8 @@ import {
   resolveScanPath,
   runCommand,
   validateExactVersion,
+  validateGitReference,
+  validateReportSize,
 } from './lib.mjs';
 
 function setOutput(name, value) {
@@ -38,7 +41,7 @@ function toolExecutable(toolDirectory) {
 
 function emitFailure(message, outputDirectory, artifactName, sarifCategory) {
   process.stdout.write(`::error title=PackageMedic action::${escapeCommandData(message)}\n`);
-  appendSummary(`## PackageMedic\n\n**Operational error** — ${String(message).replaceAll('\n', ' ')}\n`);
+  appendSummary(`## PackageMedic\n\n**Operational error** — ${escapeMarkdown(message)}\n`);
   setOutput('exit-code', 2);
   setOutput('json-file', path.join(outputDirectory, 'packagemedic.json'));
   setOutput('sarif-file', path.join(outputDirectory, 'packagemedic.sarif'));
@@ -79,6 +82,11 @@ try {
   const version = validateExactVersion(process.env.PACKAGEMEDIC_TOOL_VERSION);
   const source = resolveNugetSource(workspace, runnerTemp, process.env.PACKAGEMEDIC_NUGET_SOURCE || 'https://api.nuget.org/v3/index.json');
   const restore = parseBoolean(process.env.PACKAGEMEDIC_RESTORE, 'restore');
+  const audit = parseBoolean(process.env.PACKAGEMEDIC_AUDIT, 'audit');
+  const includeTransitiveAudit = parseBoolean(
+    process.env.PACKAGEMEDIC_INCLUDE_TRANSITIVE_AUDIT,
+    'include-transitive-audit');
+  const diffBase = validateGitReference(process.env.PACKAGEMEDIC_DIFF_BASE);
   const annotationMode = parseAnnotationMode(process.env.PACKAGEMEDIC_ANNOTATIONS);
   parseBoolean(process.env.PACKAGEMEDIC_UPLOAD_SARIF, 'upload-sarif');
   parseBoolean(process.env.PACKAGEMEDIC_UPLOAD_ARTIFACT, 'upload-artifact');
@@ -91,8 +99,20 @@ try {
     ? enumValue(failOnNewInput, 'fail-on-new', ['none', 'warning', 'error'])
     : undefined;
   const verbosity = enumValue(process.env.PACKAGEMEDIC_VERBOSITY, 'verbosity', ['quiet', 'normal', 'detailed']);
+  const maxParallelismInput = String(process.env.PACKAGEMEDIC_MAX_PARALLELISM ?? '').trim();
+  const maxParallelism = maxParallelismInput ? Number(maxParallelismInput) : undefined;
+  if (maxParallelism !== undefined &&
+      (!Number.isInteger(maxParallelism) || maxParallelism < 1 || maxParallelism > 32)) {
+    throw new Error('max-parallelism must be an integer between 1 and 32.');
+  }
   const configFile = resolveOptionalWorkspaceFile(workspace, process.env.PACKAGEMEDIC_CONFIG, 'config');
   const baselineFile = resolveOptionalWorkspaceFile(workspace, process.env.PACKAGEMEDIC_BASELINE, 'baseline');
+  if (diffBase && baselineFile) throw new Error('baseline cannot be combined with diff-base.');
+  if (diffBase && failOnNew) throw new Error('fail-on-new cannot be combined with diff-base; diff already gates changed findings.');
+  if (diffBase && !restore) {
+    process.stdout.write(
+      '::warning title=PackageMedic diff assets::restore=false requires usable assets files tracked in both compared Git trees.\n');
+  }
 
   mkdirSync(outputDirectory, { recursive: true });
   const realWorkspace = realpathSync(workspace);
@@ -119,12 +139,19 @@ try {
 
   const jsonFile = path.join(outputDirectory, 'packagemedic.json');
   const sarifFile = path.join(outputDirectory, 'packagemedic.sarif');
-  const baseArguments = ['doctor', scanPath, '--verbosity', verbosity];
+  const baseArguments = diffBase
+    ? ['diff', diffBase, scanPath, '--verbosity', verbosity]
+    : ['doctor', scanPath, '--verbosity', verbosity];
+  if (audit) {
+    baseArguments.push('--audit');
+    if (includeTransitiveAudit) baseArguments.push('--include-transitive');
+  }
   if (failOn) baseArguments.push('--fail-on', failOn);
   if (!restore) baseArguments.push('--no-restore');
   if (configFile) baseArguments.push('--config', configFile);
-  if (baselineFile) baseArguments.push('--baseline', baselineFile);
-  if (failOnNew) baseArguments.push('--fail-on-new', failOnNew);
+  if (!diffBase && baselineFile) baseArguments.push('--baseline', baselineFile);
+  if (!diffBase && failOnNew) baseArguments.push('--fail-on-new', failOnNew);
+  if (maxParallelism !== undefined) baseArguments.push('--max-parallelism', String(maxParallelism));
   const scanExit = runCommand(executable, [
     ...baseArguments,
     '--format', 'json',
@@ -135,6 +162,7 @@ try {
   let report;
   let details = { counts: { errors: 0, warnings: 0, information: 0 }, diagnostics: [] };
   if (existsSync(jsonFile)) {
+    validateReportSize(statSync(jsonFile).size);
     report = JSON.parse(readFileSync(jsonFile, 'utf8'));
     details = reportDetails(report);
   }

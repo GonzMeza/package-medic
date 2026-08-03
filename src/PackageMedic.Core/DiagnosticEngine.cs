@@ -29,13 +29,16 @@ public sealed class DiagnosticEngine
 
     private static IEnumerable<Diagnostic> FindUnusedCentralVersions(IReadOnlyList<ProjectAnalysis> projects)
     {
+        var directPackageIds = projects.ToDictionary(
+            project => project,
+            project => project.DirectPackages.Select(item => item.Id).ToHashSet(StringComparer.OrdinalIgnoreCase));
         var occurrences = projects.SelectMany(project => project.CentralVersions.Select(version => (Project: project, Version: version)));
         foreach (var group in occurrences.GroupBy(
                      item => (File: item.Version.SourceFile.ToUpperInvariant(), item.Version.Line, Id: item.Version.Id.ToUpperInvariant(), item.Version.Version)))
         {
             var affectedProjects = group.Select(item => item.Project).DistinctBy(project => project.ProjectPath).ToArray();
             var id = group.First().Version.Id;
-            var isDirectlyUsed = affectedProjects.Any(project => project.DirectPackages.Any(package => PackageEquals(package.Id, id)));
+            var isDirectlyUsed = affectedProjects.Any(project => directPackageIds[project].Contains(id));
             var isTransitivelyPinned = affectedProjects.Any(project =>
                 project.CentralPackageTransitivePinningEnabled && project.ResolvedPackages.Contains(id));
             if (isDirectlyUsed || isTransitivelyPinned)
@@ -249,8 +252,6 @@ public sealed class DiagnosticEngine
             $"{itemName} {packageId} has floating {metadataName}='{version}'.",
             "Pin an exact version or an intentionally bounded non-floating range, then review the dependency update policy.",
             DiagnosticConfidence.High);
-
-    private static bool PackageEquals(string left, string right) => left.Equals(right, StringComparison.OrdinalIgnoreCase);
 
     private static string DiagnosticIdentity(Diagnostic item) =>
         $"{item.Code}|{item.OriginalCode}|{item.Project}|{item.File}|{item.Line}|{item.Evidence}";

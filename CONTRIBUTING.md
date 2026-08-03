@@ -7,11 +7,14 @@ Thank you for helping make .NET dependency diagnostics clearer and safer.
 Install the SDK selected by `global.json`, then run:
 
 ```console
-dotnet restore
+dotnet restore PackageMedic.sln --locked-mode
 dotnet build --configuration Release
 dotnet test --configuration Release
 dotnet pack src/PackageMedic.Cli --configuration Release --output artifacts/packages
 ```
+
+When intentionally changing a NuGet dependency, regenerate and review the committed
+content-hash lockfiles with `dotnet restore PackageMedic.sln --use-lock-file --force-evaluate`.
 
 Warnings are errors, nullable analysis is enabled, and output should remain deterministic across platforms.
 

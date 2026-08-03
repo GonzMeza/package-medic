@@ -8,6 +8,23 @@ internal static class AtomicOutputFile
 
     public static async Task WriteAsync(string path, string content, CancellationToken cancellationToken)
     {
+        await WriteAsync(
+            path,
+            async (stream, token) =>
+            {
+                await using var writer = new StreamWriter(stream, Utf8WithoutBom, leaveOpen: true);
+                await writer.WriteAsync(content.AsMemory(), token).ConfigureAwait(false);
+                await writer.FlushAsync(token).ConfigureAwait(false);
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    public static async Task WriteAsync(
+        string path,
+        Func<Stream, CancellationToken, Task> writeContent,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(writeContent);
         var fullPath = Path.GetFullPath(path);
         var directory = Path.GetDirectoryName(fullPath)
             ?? throw new IOException($"The output path has no parent directory: {fullPath}");
@@ -19,7 +36,18 @@ internal static class AtomicOutputFile
 
         try
         {
-            await File.WriteAllTextAsync(temporaryPath, content, Utf8WithoutBom, cancellationToken).ConfigureAwait(false);
+            await using (var stream = new FileStream(
+                             temporaryPath,
+                             FileMode.CreateNew,
+                             FileAccess.Write,
+                             FileShare.None,
+                             bufferSize: 64 * 1024,
+                             FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                await writeContent(stream, cancellationToken).ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             File.Move(temporaryPath, fullPath, overwrite: true);
         }
         finally

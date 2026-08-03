@@ -20,7 +20,8 @@ public sealed class FloatingVersionIntegrationTests
                 "--verbosity=quiet",
             ],
             output,
-            error);
+            error,
+            TestContext.Current.CancellationToken);
 
         Assert.Equal(0, exitCode);
         Assert.Equal(string.Empty, error.ToString());

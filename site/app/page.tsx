@@ -1,6 +1,7 @@
 "use client";
 
 /* eslint-disable @next/next/no-img-element */
+import Link from "next/link";
 import { useState } from "react";
 import {
   assetPath,
@@ -53,6 +54,12 @@ const diagnostics = [
     copy: "Flag floating PackageVersion, Version, and VersionOverride declarations before they make restores drift.",
     tone: "blue",
   },
+  {
+    code: "PM007",
+    title: "Known vulnerabilities",
+    copy: "Turn official NuGet audit evidence into package, framework, advisory, and dependency-kind diagnostics.",
+    tone: "mint",
+  },
 ];
 
 export default function Home() {
@@ -72,6 +79,7 @@ export default function Home() {
           <span>PackageMedic</span>
         </a>
         <div className="nav-links">
+          <Link href="/docs">Docs</Link>
           <a href="#diagnostics">Diagnostics</a>
           <a href="#workflow">How it works</a>
           <a href="#policy">Policy</a>
@@ -101,8 +109,8 @@ export default function Home() {
           </h1>
           <p className="hero-lede">
             PackageMedic scans SDK-style .NET projects for dependency drift,
-            stale central versions, CPM bypasses, floating versions, and
-            restore problems—then explains what to review.
+            stale central versions, CPM bypasses, floating versions,
+            vulnerabilities, and Git graph changes—then explains what to review.
           </p>
 
           <div className="install-box" aria-label="Install PackageMedic">
@@ -114,7 +122,10 @@ export default function Home() {
           </div>
 
           <div className="hero-actions">
-            <a className="button primary" href="#workflow">
+            <Link className="button primary" href="/docs/getting-started">
+              Read the docs <span aria-hidden="true">→</span>
+            </Link>
+            <a className="button secondary" href="#workflow">
               See the scan flow <span aria-hidden="true">↓</span>
             </a>
             <a
@@ -188,7 +199,7 @@ export default function Home() {
 
       <section className="signal-strip" aria-label="Compatibility summary">
         <div><strong>.NET 8–10</strong><span>SDK-style projects</span></div>
-        <div><strong>Policy aware</strong><span>Config · baseline · suppressions</span></div>
+        <div><strong>Graph aware</strong><span>Inventory · audit · Git diff</span></div>
         <div><strong>Text · JSON · SARIF</strong><span>Human and CI output</span></div>
         <div><strong>Cross-platform</strong><span>Windows · Linux · macOS</span></div>
       </section>
@@ -197,7 +208,7 @@ export default function Home() {
         <div className="section-heading">
           <div>
             <span className="section-kicker">Diagnostic matrix</span>
-            <h2>Six checks. One clearer graph.</h2>
+            <h2>Seven checks. One clearer graph.</h2>
           </div>
           <p>
             Each finding includes evidence, project context, source location
@@ -236,6 +247,7 @@ export default function Home() {
             <li><span>03</span><div><strong>Resolve</strong><small>Direct and transitive packages from project.assets.json.</small></div></li>
             <li><span>04</span><div><strong>Diagnose</strong><small>Text, deterministic JSON, or SARIF with exit codes.</small></div></li>
             <li><span>05</span><div><strong>Classify</strong><small>New, existing, and resolved against a portable baseline.</small></div></li>
+            <li><span>06</span><div><strong>Compare</strong><small>Audit vulnerabilities or diff the graph against a Git ref.</small></div></li>
           </ol>
         </div>
 
@@ -294,7 +306,7 @@ export default function Home() {
             <article>
               <span>01</span>
               <strong>Config as code</strong>
-              <p>Enable rules, tune severity, set timeouts, and exclude portable paths.</p>
+              <p>Enable rules, tune severity, bound parallelism, set timeouts, and exclude portable paths.</p>
             </article>
             <article>
               <span>02</span>
@@ -309,7 +321,7 @@ export default function Home() {
             <article>
               <span>04</span>
               <strong>Read-only cleanup</strong>
-              <p>clean --dry-run previews high-confidence candidates; 0.3 has no apply path.</p>
+              <p>clean --dry-run previews high-confidence candidates; 0.4 has no apply path.</p>
             </article>
           </div>
         </div>
@@ -337,8 +349,8 @@ export default function Home() {
               <p className="muted">Wrote json report to reports/medic.json</p>
               <p className="muted">Wrote sarif report to reports/medic.sarif</p>
               <div className="terminal-rule" />
-              <p><span className="summary-ok">PM001–PM006 mapped</span></p>
-              <p className="muted">Shared fingerprints · new/existing baseline states</p>
+              <p><span className="summary-ok">PM001–PM007 mapped</span></p>
+              <p className="muted">Portable inventory · vulnerabilities · Git graph changes</p>
             </div>
           </div>
           <div className="ci-features">
@@ -354,13 +366,13 @@ export default function Home() {
             </article>
             <article>
               <span>03</span>
-              <strong>One scan, two reports</strong>
-              <p>Atomic --output and --sarif-output files come from one analysis.</p>
+              <strong>Official NuGet audit</strong>
+              <p>Opt into direct or transitive advisory evidence without a custom HTTP client.</p>
             </article>
             <article>
               <span>04</span>
-              <strong>Isolated Action runs</strong>
-              <p>Separate reports stay safe while policy summaries expose new, existing, resolved, and suppressed counts.</p>
+              <strong>Git-reference diffs</strong>
+              <p>Compare findings, package versions, dependency kind, and CPM settings without switching branches.</p>
             </article>
           </div>
         </div>
@@ -385,7 +397,7 @@ export default function Home() {
             <div><span>02</span><strong>No telemetry collection</strong></div>
             <div><span>03</span><strong>No private feed credentials printed</strong></div>
             <div><span>04</span><strong>Restore can be explicitly skipped</strong></div>
-            <div><span>05</span><strong>Subprocess output and time are bounded</strong></div>
+            <div><span>05</span><strong>Inputs, parallelism, output, time, and Git snapshots are bounded</strong></div>
           </div>
         </div>
       </section>
@@ -415,6 +427,7 @@ export default function Home() {
         </div>
         <p>Open-source tooling for healthier .NET dependency graphs.</p>
         <div>
+          <Link href="/docs">Docs</Link>
           <a href="https://github.com/GonzMeza/package-medic">GitHub</a>
           <a href={nugetUrl}>NuGet</a>
           <a href="https://github.com/GonzMeza/package-medic/issues">Issues</a>

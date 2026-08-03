@@ -35,3 +35,9 @@ Resolve the original NuGet issue using its code and evidence. A failed restore i
 Emitted when an evaluated `PackageVersion`, `PackageReference Version`, or `VersionOverride` uses a documented NuGet floating pattern such as `*`, `1.*`, `1.2.*`, `1.2.3-*`, or `1.2.3-rc.*`.
 
 Fixed versions and fixed ranges are not reported. Unresolved MSBuild expressions such as `$(PackageVersion)` are ignored rather than guessed, keeping the rule conservative. Pin an exact version or a deliberate fixed range when reproducible restores are required.
+
+## PM007 — VulnerablePackage
+
+Emitted only when vulnerability auditing is requested and the active SDK's official `dotnet list package --vulnerable` JSON output reports an advisory for a resolved package. The finding records package ID, resolved version, advisory URL, project, target framework, and whether the dependency is direct or transitive.
+
+Low, moderate, and unknown severities map to a PackageMedic warning; high and critical severities map to an error. Use `--include-transitive` to include transitive packages. Review the linked advisory and validate a compatible non-vulnerable update or replacement. Failure to obtain or parse the official audit report is an operational error, not evidence that the graph is safe.

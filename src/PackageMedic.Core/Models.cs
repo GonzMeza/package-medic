@@ -14,6 +14,12 @@ public enum DiagnosticConfidence
     High,
 }
 
+public enum PackageDependencyKind
+{
+    Direct,
+    Transitive,
+}
+
 public sealed record Diagnostic(
     string Code,
     DiagnosticSeverity Severity,
@@ -41,7 +47,14 @@ public sealed record AnalysisResult(
     string Target,
     ScanSummary Summary,
     IReadOnlyList<Diagnostic> Diagnostics,
-    IReadOnlyList<string> AnalysisErrors);
+    IReadOnlyList<string> AnalysisErrors)
+{
+    public IReadOnlyList<PackageInventoryItem> Packages { get; init; } = [];
+
+    public IReadOnlyList<ProjectPackageSettings> ProjectSettings { get; init; } = [];
+
+    public IReadOnlyList<PackageVulnerability> Vulnerabilities { get; init; } = [];
+}
 
 public sealed record AnalysisOutcome(AnalysisResult Result, bool HasOperationalError);
 
@@ -49,7 +62,10 @@ public sealed record DiscoveryResult(
     string Target,
     IReadOnlyList<string> Solutions,
     IReadOnlyList<string> Projects,
-    IReadOnlyList<string> RestoreTargets);
+    IReadOnlyList<string> RestoreTargets)
+{
+    public IReadOnlyList<string> Errors { get; init; } = [];
+}
 
 public sealed record DirectPackageReference(
     string Id,
@@ -69,6 +85,21 @@ public sealed record CentralPackageVersion(
     int? Line,
     string? TargetFramework);
 
+public sealed record PackageInventoryItem(
+    string Project,
+    string Framework,
+    string Id,
+    string ResolvedVersion,
+    PackageDependencyKind DependencyKind,
+    string? RequestedVersion,
+    string VersionSource,
+    string? RuntimeIdentifier = null);
+
+public sealed record ProjectPackageSettings(
+    string Project,
+    bool ManagePackageVersionsCentrally,
+    bool CentralPackageTransitivePinningEnabled);
+
 public sealed class ProjectAnalysis
 {
     public required string ProjectPath { get; init; }
@@ -86,6 +117,8 @@ public sealed class ProjectAnalysis
     public required IReadOnlySet<string> ResolvedPackages { get; init; }
 
     public required IReadOnlySet<string> TransitivePackages { get; init; }
+
+    public IReadOnlyList<PackageInventoryItem> PackageInventory { get; init; } = [];
 
     public required IReadOnlyList<Diagnostic> AssetDiagnostics { get; init; }
 
