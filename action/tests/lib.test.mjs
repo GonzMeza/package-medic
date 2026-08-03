@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import os from 'node:os';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import {
@@ -104,7 +104,7 @@ test('accepts HTTPS and trusted local NuGet sources only', () => {
   const feed = path.join(workspace, 'artifacts', 'packages');
   mkdirSync(feed, { recursive: true });
   assert.equal(resolveNugetSource(workspace, runnerTemp, 'https://api.nuget.org/v3/index.json'), 'https://api.nuget.org/v3/index.json');
-  assert.equal(resolveNugetSource(workspace, runnerTemp, 'artifacts/packages'), feed);
+  assert.equal(resolveNugetSource(workspace, runnerTemp, 'artifacts/packages'), realpathSync(feed));
   assert.throws(() => resolveNugetSource(workspace, runnerTemp, 'https://user:secret@example.test/v3/index.json'));
   assert.throws(() => resolveNugetSource(workspace, runnerTemp, 'https://example.test/v3/index.json?token=secret'));
   assert.throws(() => resolveNugetSource(workspace, runnerTemp, os.tmpdir()));
@@ -120,14 +120,14 @@ test('rejects scan and report paths outside trusted roots', () => {
   writeFileSync(config, '{}', 'utf8');
   writeFileSync(baseline, '{}', 'utf8');
   assert.equal(resolveScanPath(root, 'src'), path.join(root, 'src'));
-  assert.equal(resolveOutputDirectory(root, temp, ''), path.join(temp, 'packagemedic-report'));
+  assert.equal(resolveOutputDirectory(root, temp, ''), path.join(realpathSync(temp), 'packagemedic-report'));
   assert.equal(
     resolveOutputDirectory(root, temp, 'reports', '__self_2'),
-    path.join(root, 'reports', 'packagemedic-report-self_2'));
+    path.join(realpathSync(path.join(root, 'reports')), 'packagemedic-report-self_2'));
   assert.throws(() => resolveScanPath(root, '..'));
   assert.throws(() => resolveOutputDirectory(root, temp, path.join('..', 'elsewhere')));
   assert.throws(() => resolveOutputDirectory(root, temp, 'missing'));
-  assert.equal(resolveOptionalWorkspaceFile(root, 'config/packagemedic.json', 'config'), config);
+  assert.equal(resolveOptionalWorkspaceFile(root, 'config/packagemedic.json', 'config'), realpathSync(config));
   assert.equal(resolveOptionalWorkspaceFile(root, '', 'baseline'), undefined);
   assert.throws(() => resolveOptionalWorkspaceFile(root, '../baseline.json', 'baseline'));
   assert.throws(() => resolveOptionalWorkspaceFile(root, 'config/missing.json', 'config'));
