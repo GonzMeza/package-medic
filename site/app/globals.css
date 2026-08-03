@@ -579,14 +579,14 @@ a:focus-visible {
   transition: border-color 180ms ease, transform 180ms ease;
 }
 
-.diagnostic-card:nth-child(-n+3) { grid-column: span 2; }
-.diagnostic-card:nth-child(4), .diagnostic-card:nth-child(5) { grid-column: span 3; }
+.diagnostic-card:nth-child(n) { grid-column: span 2; }
 .diagnostic-card:hover { border-color: var(--card-color); transform: translateY(-4px); }
 .diagnostic-card.mint { --card-color: #55e6a5; }
 .diagnostic-card.cyan { --card-color: #35d4ff; }
 .diagnostic-card.violet { --card-color: #a78bfa; }
 .diagnostic-card.amber { --card-color: #ffbf69; }
 .diagnostic-card.coral { --card-color: #ff7a8a; }
+.diagnostic-card.blue { --card-color: #70a5ff; }
 
 .diagnostic-code {
   color: var(--card-color);

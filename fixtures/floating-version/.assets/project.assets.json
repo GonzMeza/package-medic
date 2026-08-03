@@ -1,0 +1,30 @@
+{
+  "version": 3,
+  "targets": {
+    "net8.0": {
+      "Central.Float/1.9.0": {},
+      "Direct.Float/2.8.0": {},
+      "Override.Float/3.0.0-rc.2": {},
+      "Fixed.Range/1.5.0": {}
+    }
+  },
+  "libraries": {
+    "Central.Float/1.9.0": { "type": "package" },
+    "Direct.Float/2.8.0": { "type": "package" },
+    "Override.Float/3.0.0-rc.2": { "type": "package" },
+    "Fixed.Range/1.5.0": { "type": "package" }
+  },
+  "project": {
+    "frameworks": {
+      "net8.0": {
+        "dependencies": {
+          "Central.Float": { "target": "Package", "version": "[1.0.0, )" },
+          "Direct.Float": { "target": "Package", "version": "[2.0.0, )" },
+          "Override.Float": { "target": "Package", "version": "[3.0.0-rc.2, )" },
+          "Fixed.Range": { "target": "Package", "version": "[1.0.0, 2.0.0)" }
+        }
+      }
+    }
+  },
+  "logs": []
+}

@@ -9,12 +9,15 @@ permissions:
 
 steps:
   - uses: actions/checkout@v6
-  - uses: GonzMeza/package-medic@v0.2.0
+  - uses: GonzMeza/package-medic@v0.3.0
     with:
       path: .
-      fail-on: warning
+      config: .packagemedic.json
+      baseline: .packagemedic-baseline.json
+      fail-on: none
+      fail-on-new: warning
       restore: 'true'
-      annotations: 'true'
+      annotations: new
       upload-sarif: 'true'
       upload-artifact: 'true'
 ```
@@ -28,13 +31,16 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 | Input | Default | Purpose |
 | --- | --- | --- |
 | `path` | `.` | Project, solution, or directory to scan |
-| `tool-version` | `0.2.0` | Exact PackageMedic.Tool version |
+| `tool-version` | `0.3.0` | Exact PackageMedic.Tool version |
 | `dotnet-version` | `8.0.x` | SDK used by the action |
 | `nuget-source` | NuGet.org | Exclusive feed used to install the tool |
 | `restore` | `true` | Restore before the first scan |
-| `fail-on` | `warning` | `none`, `warning`, or `error` |
+| `fail-on` | unset | Optional `none`, `warning`, or `error`; configuration or CLI default (`warning`) applies when unset |
+| `fail-on-new` | unset | Optional `none`, `warning`, or `error` threshold for new diagnostics |
+| `config` | unset | Repository-relative PackageMedic configuration file |
+| `baseline` | unset | Repository-relative PackageMedic baseline file |
 | `verbosity` | `normal` | `quiet`, `normal`, or `detailed` |
-| `annotations` | `true` | Emit workflow annotations |
+| `annotations` | `new` | `new`, `all`, or `none`; legacy `true`/`false` map to `all`/`none` |
 | `upload-sarif` | `true` | Send SARIF to code scanning |
 | `upload-artifact` | `true` | Retain JSON and SARIF for 14 days |
 | `artifact-name` | `packagemedic-report` | Safe artifact base name; an invocation suffix is added |
@@ -46,5 +52,9 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 `exit-code`, `json-file`, `sarif-file`, `errors`, `warnings`, `information`, `artifact-name`, and `sarif-category` are available to later steps. Exit code `0` means the threshold was not reached, `1` means it was reached, and `2` means an operational or configuration error occurred.
 
 Every invocation receives its own report folder, artifact name, and SARIF category. This prevents repeated PackageMedic steps in one job from overwriting each other's reports or uploads. The CLI's `--sarif-output` option creates both public machine-readable formats from one analysis.
+
+With a baseline, the recommended CI policy is `fail-on: none` plus `fail-on-new: warning`. Existing findings remain visible without blocking the pull request, while newly introduced warnings and errors can fail the check. The default annotation mode is `new`; choose `all` to retain the pre-0.3 behavior or `none` to disable workflow annotations. Reports produced by a pre-0.3 tool do not contain baseline metadata, so the action conservatively treats all of their diagnostics as new instead of silently hiding annotations. The job summary always reports new, existing, resolved, and policy-suppressed counts.
+
+`config` and `baseline` are passed to the same PackageMedic analysis that writes JSON and SARIF. Both must identify existing files inside `GITHUB_WORKSPACE`; paths that escape through `..` or symbolic links are rejected before the tool runs.
 
 Artifact and category base names accept letters, numbers, dots, underscores, and hyphens. Custom `output-directory` values must identify an existing base directory; the action creates only its isolated child directory after verifying that the base stays within the workspace or runner temporary directory.

@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -16,6 +17,21 @@ public interface IProcessRunner
 
 public sealed partial class ProcessRunner : IProcessRunner
 {
+    internal const int DefaultMaximumOutputCharacters = 1_000_000;
+    private static readonly TimeSpan CancellationCleanupTimeout = TimeSpan.FromSeconds(2);
+
+    private readonly int maximumOutputCharacters;
+
+    public ProcessRunner(int maximumOutputCharacters = DefaultMaximumOutputCharacters)
+    {
+        if (maximumOutputCharacters < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumOutputCharacters));
+        }
+
+        this.maximumOutputCharacters = maximumOutputCharacters;
+    }
+
     public async Task<ProcessResult> RunAsync(
         string fileName,
         IReadOnlyList<string> arguments,
@@ -41,8 +57,8 @@ public sealed partial class ProcessRunner : IProcessRunner
 
         using var process = new Process { StartInfo = startInfo };
         process.Start();
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        var stdoutTask = ReadBoundedAsync(process.StandardOutput, maximumOutputCharacters, cancellationToken);
+        var stderrTask = ReadBoundedAsync(process.StandardError, maximumOutputCharacters, cancellationToken);
 
         try
         {
@@ -54,9 +70,23 @@ public sealed partial class ProcessRunner : IProcessRunner
             {
                 process.Kill(entireProcessTree: true);
             }
-            catch (InvalidOperationException)
+            catch (Exception exception) when (IsExpectedTerminationException(exception))
             {
-                // The process exited between cancellation and the kill request.
+                // Cancellation remains the public result even if the process exited,
+                // access was denied, or a descendant could not be terminated.
+            }
+
+            using var cleanupSource = new CancellationTokenSource(CancellationCleanupTimeout);
+            try
+            {
+                await process.WaitForExitAsync(cleanupSource.Token).ConfigureAwait(false);
+                await Task.WhenAll(stdoutTask, stderrTask)
+                    .WaitAsync(cleanupSource.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is IOException or ObjectDisposedException or OperationCanceledException)
+            {
+                // Cancellation is the public result; bounded cleanup and stream errors are incidental.
             }
 
             throw;
@@ -68,11 +98,57 @@ public sealed partial class ProcessRunner : IProcessRunner
             RedactSecrets(await stderrTask.ConfigureAwait(false)));
     }
 
+    internal static async Task<string> ReadBoundedAsync(
+        TextReader reader,
+        int maximumCharacters,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(reader);
+        if (maximumCharacters < 1)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maximumCharacters));
+        }
+
+        var buffer = new char[8192];
+        var builder = new StringBuilder(Math.Min(maximumCharacters, buffer.Length));
+        var truncated = false;
+        while (true)
+        {
+            var read = await reader.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
+            if (read == 0)
+            {
+                break;
+            }
+
+            var remaining = maximumCharacters - builder.Length;
+            if (remaining > 0)
+            {
+                builder.Append(buffer, 0, Math.Min(read, remaining));
+            }
+
+            truncated |= read > remaining;
+        }
+
+        if (truncated)
+        {
+            builder.AppendLine();
+            builder.Append("[PackageMedic: subprocess output truncated]");
+        }
+
+        return builder.ToString();
+    }
+
     internal static string RedactSecrets(string value)
     {
         value = CredentialsInUrlRegex().Replace(value, "${scheme}[REDACTED]@");
         return SecretAssignmentRegex().Replace(value, "${name}=[REDACTED]");
     }
+
+    internal static bool IsExpectedTerminationException(Exception exception) => exception is
+        InvalidOperationException or
+        Win32Exception or
+        NotSupportedException or
+        AggregateException;
 
     [GeneratedRegex("(?<scheme>https?://)[^/@\\s:]+:[^/@\\s]+@", RegexOptions.IgnoreCase)]
     private static partial Regex CredentialsInUrlRegex();

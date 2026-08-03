@@ -1,8 +1,15 @@
 import path from 'node:path';
-import { realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { realpathSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const exactNuGetVersion = /^\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
+
+export function runCommand(executable, args, spawn = spawnSync) {
+  const result = spawn(executable, args, { windowsHide: true, stdio: 'inherit' });
+  if (result.error) throw result.error;
+  return Number.isInteger(result.status) ? result.status : 2;
+}
 
 export function parseBoolean(value, name) {
   const normalized = String(value ?? '').trim().toLowerCase();
@@ -11,10 +18,18 @@ export function parseBoolean(value, name) {
   throw new Error(`${name} must be 'true' or 'false'.`);
 }
 
+export function parseAnnotationMode(value) {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (normalized === 'true' || normalized === 'all') return 'all';
+  if (normalized === 'false' || normalized === 'none') return 'none';
+  if (normalized === 'new') return 'new';
+  throw new Error("annotations must be 'new', 'all', or 'none' (true/false remain supported).");
+}
+
 export function validateExactVersion(value) {
   const version = String(value ?? '').trim();
   if (!exactNuGetVersion.test(version) || version.includes('*')) {
-    throw new Error('tool-version must be an exact NuGet version, for example 0.2.0.');
+    throw new Error('tool-version must be an exact NuGet version, for example 0.3.0.');
   }
   return version;
 }
@@ -55,6 +70,29 @@ export function resolveScanPath(workspace, inputPath) {
     throw new Error('path must resolve inside GITHUB_WORKSPACE.');
   }
   return candidate;
+}
+
+export function resolveOptionalWorkspaceFile(workspace, inputPath, name) {
+  const raw = String(inputPath ?? '').trim();
+  if (!raw) return undefined;
+  const candidate = path.resolve(workspace, raw);
+  if (!isWithin(workspace, candidate)) {
+    throw new Error(`${name} must resolve inside GITHUB_WORKSPACE.`);
+  }
+
+  let realCandidate;
+  try {
+    realCandidate = realpathSync(candidate);
+  } catch {
+    throw new Error(`${name} must name an existing file.`);
+  }
+  if (!isWithin(realpathSync(workspace), realCandidate)) {
+    throw new Error(`${name} cannot resolve through a symbolic link outside GITHUB_WORKSPACE.`);
+  }
+  if (!statSync(realCandidate).isFile()) {
+    throw new Error(`${name} must name a regular file.`);
+  }
+  return realCandidate;
 }
 
 export function resolveOutputDirectory(workspace, runnerTemp, inputPath, instance = '') {
@@ -173,7 +211,36 @@ export function reportDetails(report) {
     else counts.information += 1;
   }
 
-  return { counts, diagnostics: report.diagnostics };
+  const count = (value) => {
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
+  };
+  const classifiedNew = report.diagnostics.filter(
+    (diagnostic) => String(diagnostic?.baselineState ?? '').toLowerCase() === 'new').length;
+  const classifiedExisting = report.diagnostics.filter(
+    (diagnostic) => String(diagnostic?.baselineState ?? '').toLowerCase() === 'existing').length;
+  const hasBaselineSummary = report.baseline && typeof report.baseline === 'object';
+  const hasBaselineStates = classifiedNew + classifiedExisting > 0;
+  const legacyUnclassified = !hasBaselineSummary && !hasBaselineStates;
+  const suppressedDiagnostics = Array.isArray(report.suppressedDiagnostics) ? report.suppressedDiagnostics : [];
+  const baseline = {
+    new: count(report.baseline?.new ?? (legacyUnclassified ? report.diagnostics.length : classifiedNew)),
+    existing: count(report.baseline?.existing ?? classifiedExisting),
+    resolved: count(report.baseline?.resolved),
+  };
+  const suppressed = count(report.policy?.suppressed ?? suppressedDiagnostics.length);
+
+  return { counts, diagnostics: report.diagnostics, baseline, suppressed, suppressedDiagnostics };
+}
+
+export function diagnosticsForAnnotations(details, mode) {
+  if (mode === 'none') return [];
+  if (mode === 'all') return details.diagnostics;
+  if (mode === 'new') {
+    return details.diagnostics.filter(
+      (diagnostic) => String(diagnostic?.baselineState ?? '').toLowerCase() !== 'existing');
+  }
+  throw new Error(`Unknown annotation mode '${mode}'.`);
 }
 
 function markdownCell(value) {
@@ -182,7 +249,7 @@ function markdownCell(value) {
 
 export function renderSummary(report, details, exitCode, workspace = process.cwd()) {
   const status = exitCode === 0 ? 'Passed' : exitCode === 1 ? 'Threshold reached' : 'Operational error';
-  const target = markdownCell(safeRelativeFile(workspace, report?.target) ?? 'Repository');
+  const target = markdownCell(safeRelativeFile(workspace, report?.target) || 'Repository');
   const projects = Number(report?.summary?.projects ?? 0);
   const analysisErrors = Array.isArray(report?.analysisErrors) ? report.analysisErrors.length : 0;
   return [
@@ -193,6 +260,10 @@ export function renderSummary(report, details, exitCode, workspace = process.cwd
     '| Target | Projects | Errors | Warnings | Information | Analysis errors |',
     '| --- | ---: | ---: | ---: | ---: | ---: |',
     `| ${target} | ${projects} | ${details.counts.errors} | ${details.counts.warnings} | ${details.counts.information} | ${analysisErrors} |`,
+    '',
+    '| New | Existing | Resolved | Suppressed |',
+    '| ---: | ---: | ---: | ---: |',
+    `| ${details.baseline.new} | ${details.baseline.existing} | ${details.baseline.resolved} | ${details.suppressed} |`,
     '',
     'Reports are available in the action outputs and, when enabled, the workflow artifact.',
     '',

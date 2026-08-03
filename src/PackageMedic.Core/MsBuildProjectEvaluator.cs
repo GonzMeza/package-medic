@@ -4,8 +4,11 @@ using System.Xml.Linq;
 
 namespace PackageMedic.Core;
 
-public sealed class MsBuildProjectEvaluator(IProcessRunner processRunner)
+public sealed class MsBuildProjectEvaluator
 {
+    private readonly IProcessRunner processRunner;
+    private readonly TimeSpan timeout;
+
     private static readonly string[] QueriedProperties =
     [
         "ManagePackageVersionsCentrally",
@@ -16,6 +19,17 @@ public sealed class MsBuildProjectEvaluator(IProcessRunner processRunner)
         "BaseIntermediateOutputPath",
         "MSBuildProjectDirectory",
     ];
+
+    public MsBuildProjectEvaluator(IProcessRunner processRunner)
+        : this(processRunner, AnalysisExecutionOptions.Default.MsBuildEvaluationTimeout)
+    {
+    }
+
+    public MsBuildProjectEvaluator(IProcessRunner processRunner, TimeSpan timeout)
+    {
+        this.processRunner = processRunner ?? throw new ArgumentNullException(nameof(processRunner));
+        this.timeout = timeout;
+    }
 
     public async Task<EvaluatedProject> EvaluateAsync(string projectPath, CancellationToken cancellationToken)
     {
@@ -110,11 +124,22 @@ public sealed class MsBuildProjectEvaluator(IProcessRunner processRunner)
             arguments.Add($"-property:TargetFramework={targetFramework}");
         }
 
-        var result = await processRunner.RunAsync(
-            "dotnet",
-            arguments,
-            Path.GetDirectoryName(projectPath)!,
-            cancellationToken).ConfigureAwait(false);
+        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(timeout);
+        ProcessResult result;
+        try
+        {
+            result = await processRunner.RunAsync(
+                "dotnet",
+                arguments,
+                Path.GetDirectoryName(projectPath)!,
+                timeoutSource.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new InvalidOperationException(
+                $"MSBuild evaluation timed out for '{projectPath}' after {timeout.TotalSeconds:0} seconds.");
+        }
         if (result.ExitCode != 0)
         {
             throw new InvalidOperationException($"MSBuild evaluation failed for '{projectPath}': {CompactError(result)}");
@@ -272,7 +297,10 @@ internal sealed class XmlItemLineLocator
         var candidates = locations.Where(item =>
             item.ItemName.Equals(itemName, StringComparison.OrdinalIgnoreCase) &&
             item.Id.Equals(id, StringComparison.OrdinalIgnoreCase) &&
-            (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(item.Version) || item.Version.Equals(version, StringComparison.OrdinalIgnoreCase)))
+            (string.IsNullOrWhiteSpace(version) ||
+             (string.IsNullOrWhiteSpace(item.Version) && string.IsNullOrWhiteSpace(item.VersionOverride)) ||
+             item.Version.Equals(version, StringComparison.OrdinalIgnoreCase) ||
+             item.VersionOverride.Equals(version, StringComparison.OrdinalIgnoreCase)))
             .ToArray();
         if (candidates.Length == 0)
         {
@@ -296,6 +324,7 @@ internal sealed class XmlItemLineLocator
                     element.Name.LocalName,
                     (string?)element.Attribute("Include") ?? (string?)element.Attribute("Update") ?? string.Empty,
                     (string?)element.Attribute("Version") ?? element.Elements().FirstOrDefault(child => child.Name.LocalName == "Version")?.Value ?? string.Empty,
+                    (string?)element.Attribute("VersionOverride") ?? element.Elements().FirstOrDefault(child => child.Name.LocalName == "VersionOverride")?.Value ?? string.Empty,
                     (element as IXmlLineInfo)?.LineNumber ?? 0))
                 .Where(item => !string.IsNullOrWhiteSpace(item.Id))
                 .ToArray();
@@ -306,5 +335,5 @@ internal sealed class XmlItemLineLocator
         }
     }
 
-    private sealed record XmlItemLocation(string ItemName, string Id, string Version, int Line);
+    private sealed record XmlItemLocation(string ItemName, string Id, string Version, string VersionOverride, int Line);
 }

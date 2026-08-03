@@ -4,8 +4,11 @@
 import { useState } from "react";
 import {
   assetPath,
+  baselineCommand,
   doctorCommand,
+  initCommand,
   installCommand,
+  newOnlyCommand,
   nugetUrl,
   product,
   releaseLabel,
@@ -44,6 +47,12 @@ const diagnostics = [
     copy: "Surface important NuGet codes such as NU1605, NU1107, and NU1109.",
     tone: "coral",
   },
+  {
+    code: "PM006",
+    title: "Floating versions",
+    copy: "Flag floating PackageVersion, Version, and VersionOverride declarations before they make restores drift.",
+    tone: "blue",
+  },
 ];
 
 export default function Home() {
@@ -65,6 +74,7 @@ export default function Home() {
         <div className="nav-links">
           <a href="#diagnostics">Diagnostics</a>
           <a href="#workflow">How it works</a>
+          <a href="#policy">Policy</a>
           <a href="#ci">CI</a>
           <a href="#safety">Safety</a>
         </div>
@@ -91,8 +101,8 @@ export default function Home() {
           </h1>
           <p className="hero-lede">
             PackageMedic scans SDK-style .NET projects for dependency drift,
-            stale central versions, CPM bypasses, and restore problems—then
-            explains what to review.
+            stale central versions, CPM bypasses, floating versions, and
+            restore problems—then explains what to review.
           </p>
 
           <div className="install-box" aria-label="Install PackageMedic">
@@ -120,7 +130,7 @@ export default function Home() {
           <ul className="hero-trust" aria-label="Key product traits">
             <li><span aria-hidden="true">◆</span> Read-only</li>
             <li><span aria-hidden="true">◆</span> No telemetry</li>
-            <li><span aria-hidden="true">◆</span> CI-ready SARIF</li>
+            <li><span aria-hidden="true">◆</span> Baseline-aware</li>
           </ul>
         </div>
 
@@ -178,7 +188,7 @@ export default function Home() {
 
       <section className="signal-strip" aria-label="Compatibility summary">
         <div><strong>.NET 8–10</strong><span>SDK-style projects</span></div>
-        <div><strong>CPM aware</strong><span>Effective MSBuild evaluation</span></div>
+        <div><strong>Policy aware</strong><span>Config · baseline · suppressions</span></div>
         <div><strong>Text · JSON · SARIF</strong><span>Human and CI output</span></div>
         <div><strong>Cross-platform</strong><span>Windows · Linux · macOS</span></div>
       </section>
@@ -187,7 +197,7 @@ export default function Home() {
         <div className="section-heading">
           <div>
             <span className="section-kicker">Diagnostic matrix</span>
-            <h2>Five checks. One clearer graph.</h2>
+            <h2>Six checks. One clearer graph.</h2>
           </div>
           <p>
             Each finding includes evidence, project context, source location
@@ -225,6 +235,7 @@ export default function Home() {
             <li><span>02</span><div><strong>Evaluate</strong><small>Imports, conditions, target frameworks, and CPM.</small></div></li>
             <li><span>03</span><div><strong>Resolve</strong><small>Direct and transitive packages from project.assets.json.</small></div></li>
             <li><span>04</span><div><strong>Diagnose</strong><small>Text, deterministic JSON, or SARIF with exit codes.</small></div></li>
+            <li><span>05</span><div><strong>Classify</strong><small>New, existing, and resolved against a portable baseline.</small></div></li>
           </ol>
         </div>
 
@@ -251,6 +262,59 @@ export default function Home() {
         </div>
       </section>
 
+      <section className="section policy-section" id="policy">
+        <div className="section-heading">
+          <div>
+            <span className="section-kicker">Adopt it without CI shock</span>
+            <h2>Repository policy, with every exception accounted for.</h2>
+          </div>
+          <p>
+            Versioned configuration keeps the same rules on every machine.
+            Baselines let established repositories block only regressions while
+            known findings remain visible.
+          </p>
+        </div>
+        <div className="ci-grid">
+          <div className="terminal-window ci-terminal" aria-label="PackageMedic policy and baseline commands">
+            <div className="terminal-bar">
+              <span /><span /><span />
+              <small>team adoption</small>
+            </div>
+            <div className="terminal-body">
+              <p><i>›</i> {initCommand}</p>
+              <p className="muted">Created .packagemedic.json</p>
+              <p><i>›</i> {baselineCommand}</p>
+              <p className="muted">Accepted findings now have portable fingerprints</p>
+              <div className="terminal-rule" />
+              <p><i>›</i> {newOnlyCommand}</p>
+              <p><span className="summary-warn">1 new</span> · 18 existing · <span className="summary-ok">2 resolved</span></p>
+            </div>
+          </div>
+          <div className="ci-features">
+            <article>
+              <span>01</span>
+              <strong>Config as code</strong>
+              <p>Enable rules, tune severity, set timeouts, and exclude portable paths.</p>
+            </article>
+            <article>
+              <span>02</span>
+              <strong>Justified suppressions</strong>
+              <p>Every exception requires a reason and stays visible in reports.</p>
+            </article>
+            <article>
+              <span>03</span>
+              <strong>New-only gates</strong>
+              <p>Keep existing debt visible while stopping fresh warnings in pull requests.</p>
+            </article>
+            <article>
+              <span>04</span>
+              <strong>Read-only cleanup</strong>
+              <p>clean --dry-run previews high-confidence candidates; 0.3 has no apply path.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
       <section className="section ci-section" id="ci">
         <div className="section-heading">
           <div>
@@ -273,15 +337,15 @@ export default function Home() {
               <p className="muted">Wrote json report to reports/medic.json</p>
               <p className="muted">Wrote sarif report to reports/medic.sarif</p>
               <div className="terminal-rule" />
-              <p><span className="summary-ok">PM001–PM005 mapped</span></p>
-              <p className="muted">Stable fingerprints · repository-relative paths</p>
+              <p><span className="summary-ok">PM001–PM006 mapped</span></p>
+              <p className="muted">Shared fingerprints · new/existing baseline states</p>
             </div>
           </div>
           <div className="ci-features">
             <article>
               <span>01</span>
-              <strong>Native annotations</strong>
-              <p>Notice, warning, and error annotations include source locations.</p>
+              <strong>New-only annotations</strong>
+              <p>Annotate new findings by default, or opt into all/none.</p>
             </article>
             <article>
               <span>02</span>
@@ -296,7 +360,7 @@ export default function Home() {
             <article>
               <span>04</span>
               <strong>Isolated Action runs</strong>
-              <p>Repeated steps keep separate report folders, artifacts, and SARIF categories.</p>
+              <p>Separate reports stay safe while policy summaries expose new, existing, resolved, and suppressed counts.</p>
             </article>
           </div>
         </div>
@@ -321,6 +385,7 @@ export default function Home() {
             <div><span>02</span><strong>No telemetry collection</strong></div>
             <div><span>03</span><strong>No private feed credentials printed</strong></div>
             <div><span>04</span><strong>Restore can be explicitly skipped</strong></div>
+            <div><span>05</span><strong>Subprocess output and time are bounded</strong></div>
           </div>
         </div>
       </section>

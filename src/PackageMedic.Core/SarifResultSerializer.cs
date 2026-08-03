@@ -1,7 +1,5 @@
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace PackageMedic.Core;
 
@@ -12,17 +10,29 @@ public static partial class SarifResultSerializer
     private const string InformationUri = "https://github.com/GonzMeza/package-medic";
 
     public static string Serialize(AnalysisResult result, string repositoryRoot)
+        => Serialize(result, repositoryRoot, null);
+
+    public static string Serialize(
+        AnalysisResult result,
+        string repositoryRoot,
+        BaselineComparison? baseline)
     {
         ArgumentNullException.ThrowIfNull(result);
         ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
 
-        var root = PortablePath.ParseRoot(repositoryRoot);
+        var root = RepositoryRoot.Parse(repositoryRoot);
+        var baselineStates = baseline?.Current
+            .GroupBy(item => item.Fingerprint, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First().State,
+                StringComparer.OrdinalIgnoreCase);
         var rules = DiagnosticRuleCatalog.All.OrderBy(rule => rule.Code, StringComparer.Ordinal).ToArray();
         var ruleIndexes = rules
             .Select((rule, index) => (rule.Code, Index: index))
             .ToDictionary(item => item.Code, item => item.Index, StringComparer.Ordinal);
         var results = result.Diagnostics
-            .Select(diagnostic => CreateSerializableDiagnostic(diagnostic, root))
+            .Select(diagnostic => CreateSerializableDiagnostic(diagnostic, root, baselineStates))
             .OrderByDescending(item => item.Diagnostic.Severity)
             .ThenBy(item => item.Diagnostic.Code, StringComparer.Ordinal)
             .ThenBy(item => item.RelativePath, StringComparer.Ordinal)
@@ -55,41 +65,31 @@ public static partial class SarifResultSerializer
         return Encoding.UTF8.GetString(stream.ToArray());
     }
 
-    private static SerializableDiagnostic CreateSerializableDiagnostic(Diagnostic diagnostic, PortablePath root)
+    private static SerializableDiagnostic CreateSerializableDiagnostic(
+        Diagnostic diagnostic,
+        RepositoryRoot root,
+        IReadOnlyDictionary<string, BaselineDiagnosticState>? baselineStates)
     {
-        var relativePath = PortablePath.TryGetRelativeUri(diagnostic.File, root);
+        var identity = DiagnosticFingerprint.Create(diagnostic, root);
         var message = string.Join(
             "\n\n",
-            SanitizeText(diagnostic.Title, root),
-            SanitizeText(diagnostic.Explanation, root),
-            $"Evidence: {SanitizeText(diagnostic.Evidence, root)}",
-            $"Suggested action: {SanitizeText(diagnostic.SuggestedAction, root)}");
-        var fingerprintInput = string.Join(
-            "\n",
-            diagnostic.Code,
-            diagnostic.OriginalCode ?? string.Empty,
-            relativePath ?? string.Empty,
-            SanitizeText(diagnostic.Evidence, root));
-        var fingerprint = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fingerprintInput))).ToLowerInvariant();
+            DiagnosticFingerprint.SanitizeText(diagnostic.Title, root),
+            DiagnosticFingerprint.SanitizeText(diagnostic.Explanation, root),
+            $"Evidence: {DiagnosticFingerprint.SanitizeText(diagnostic.Evidence, root)}",
+            $"Suggested action: {DiagnosticFingerprint.SanitizeText(diagnostic.SuggestedAction, root)}");
 
-        return new SerializableDiagnostic(diagnostic, relativePath, message, fingerprint);
-    }
-
-    private static string SanitizeText(string value, PortablePath root)
-    {
-        var redacted = ProcessRunner.RedactSecrets(value);
-        if (root.Normalized != "/")
+        BaselineDiagnosticState? baselineState = null;
+        if (baselineStates?.TryGetValue(identity.Fingerprint, out var classifiedState) == true)
         {
-            redacted = redacted.Replace(root.Original, SourceRootBaseId, root.Comparison);
-            if (!root.Original.Equals(root.Normalized, StringComparison.Ordinal))
-            {
-                redacted = redacted.Replace(root.Normalized, SourceRootBaseId, root.Comparison);
-            }
+            baselineState = classifiedState;
         }
 
-        redacted = redacted.Replace('\\', '/');
-        redacted = WindowsAbsolutePathRegex().Replace(redacted, "[ABSOLUTE_PATH]");
-        return UnixAbsolutePathRegex().Replace(redacted, "[ABSOLUTE_PATH]");
+        return new SerializableDiagnostic(
+            diagnostic,
+            identity.RelativePath,
+            message,
+            identity.Fingerprint,
+            baselineState);
     }
 
     private static void WriteTool(
@@ -137,6 +137,13 @@ public static partial class SarifResultSerializer
         writer.WriteString("ruleId", diagnostic.Code);
         writer.WriteNumber("ruleIndex", ruleIndex);
         writer.WriteString("level", ToSarifLevel(diagnostic.Severity));
+        if (item.BaselineState is { } baselineState)
+        {
+            writer.WriteString(
+                "baselineState",
+                baselineState == BaselineDiagnosticState.New ? "new" : "unchanged");
+        }
+
         WriteText(writer, "message", item.Message);
 
         if (item.RelativePath is not null)
@@ -162,7 +169,7 @@ public static partial class SarifResultSerializer
 
         writer.WriteStartObject("partialFingerprints");
         writer.WriteString("primaryLocationLineHash", item.Fingerprint);
-        writer.WriteString("packageMedicDiagnostic/v1", item.Fingerprint);
+        writer.WriteString(DiagnosticFingerprint.Algorithm, item.Fingerprint);
         writer.WriteEndObject();
 
         if (diagnostic.Confidence is not null || diagnostic.OriginalCode is not null)
@@ -203,105 +210,7 @@ public static partial class SarifResultSerializer
         Diagnostic Diagnostic,
         string? RelativePath,
         string Message,
-        string Fingerprint);
+        string Fingerprint,
+        BaselineDiagnosticState? BaselineState);
 
-    private sealed record PortablePath(string Original, string Normalized, bool IsWindows, StringComparison Comparison)
-    {
-        public static PortablePath ParseRoot(string value)
-        {
-            var original = value.Trim();
-            var normalized = NormalizeSeparators(original);
-            var isWindows = IsWindowsAbsolute(normalized);
-            if (!isWindows && !IsUnixAbsolute(normalized))
-            {
-                throw new ArgumentException("The repository root must be an absolute Windows or Unix path.", nameof(value));
-            }
-
-            var isFileSystemRoot = normalized == "/" ||
-                                   (isWindows && normalized.Length == 3 && normalized[1] == ':' && normalized[2] == '/');
-            if (!isFileSystemRoot)
-            {
-                original = original.TrimEnd('/', '\\');
-                normalized = normalized.TrimEnd('/');
-            }
-
-            return new PortablePath(
-                original,
-                normalized,
-                isWindows,
-                isWindows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
-        }
-
-        public static string? TryGetRelativeUri(string? file, PortablePath root)
-        {
-            if (string.IsNullOrWhiteSpace(file))
-            {
-                return null;
-            }
-
-            var normalizedFile = NormalizeSeparators(file.Trim());
-            string relative;
-            if (IsWindowsAbsolute(normalizedFile) || IsUnixAbsolute(normalizedFile))
-            {
-                var fileIsWindows = IsWindowsAbsolute(normalizedFile);
-                var rootEndsWithSeparator = root.Normalized.EndsWith("/", StringComparison.Ordinal);
-                if (fileIsWindows != root.IsWindows ||
-                    !normalizedFile.StartsWith(root.Normalized, root.Comparison) ||
-                    (!rootEndsWithSeparator && normalizedFile.Length > root.Normalized.Length &&
-                     normalizedFile[root.Normalized.Length] != '/'))
-                {
-                    return null;
-                }
-
-                relative = normalizedFile[root.Normalized.Length..].TrimStart('/');
-            }
-            else
-            {
-                relative = normalizedFile.TrimStart('/');
-            }
-
-            var segments = new List<string>();
-            foreach (var segment in relative.Split('/', StringSplitOptions.RemoveEmptyEntries))
-            {
-                if (segment == ".")
-                {
-                    continue;
-                }
-
-                if (segment == "..")
-                {
-                    if (segments.Count == 0)
-                    {
-                        return null;
-                    }
-
-                    segments.RemoveAt(segments.Count - 1);
-                    continue;
-                }
-
-                segments.Add(segment);
-            }
-
-            if (segments.Count == 0)
-            {
-                return null;
-            }
-
-            return string.Join('/', segments.Select(Uri.EscapeDataString));
-        }
-
-        private static string NormalizeSeparators(string value) => value.Replace('\\', '/');
-
-        private static bool IsWindowsAbsolute(string value) =>
-            (value.Length >= 3 && char.IsAsciiLetter(value[0]) && value[1] == ':' && value[2] == '/') ||
-            value.StartsWith("//", StringComparison.Ordinal);
-
-        private static bool IsUnixAbsolute(string value) => value.StartsWith("/", StringComparison.Ordinal);
-    }
-
-    [GeneratedRegex("(?<![:A-Za-z0-9])(?:[A-Za-z]:/|//[^/\\s]+/[^/\\s]+/)[^\\s]+", RegexOptions.CultureInvariant)]
-    private static partial Regex WindowsAbsolutePathRegex();
-
-    [GeneratedRegex("(?<![:/%A-Za-z0-9])/(?:[^/\\s]+/)+[^/\\s]*", RegexOptions.CultureInvariant)]
-    private static partial Regex UnixAbsolutePathRegex();
 }

@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/GonzMeza/package-medic/main/schemas/packagemedic.schema.json",
+  "title": "PackageMedic configuration",
+  "description": "Configuration for PackageMedic 0.3 and later.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "format": "uri-reference"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "description": "Version of this configuration format, independent of the PackageMedic product version."
+    },
+    "failOn": {
+      "$ref": "#/$defs/failureLevel"
+    },
+    "failOnNew": {
+      "$ref": "#/$defs/failureLevel"
+    },
+    "baseline": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Baseline path, resolved relative to this configuration file."
+    },
+    "exclude": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "PM001": { "$ref": "#/$defs/rule" },
+        "PM002": { "$ref": "#/$defs/rule" },
+        "PM003": { "$ref": "#/$defs/rule" },
+        "PM004": { "$ref": "#/$defs/rule" },
+        "PM005": { "$ref": "#/$defs/rule" },
+        "PM006": { "$ref": "#/$defs/rule" }
+      }
+    },
+    "suppressions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/suppression"
+      }
+    },
+    "timeouts": {
+      "$ref": "#/$defs/timeouts"
+    }
+  },
+  "$defs": {
+    "failureLevel": {
+      "type": "string",
+      "enum": ["none", "warning", "error"]
+    },
+    "severity": {
+      "type": "string",
+      "enum": ["information", "warning", "error"]
+    },
+    "ruleCode": {
+      "type": "string",
+      "enum": ["PM001", "PM002", "PM003", "PM004", "PM005", "PM006"]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "severity": {
+          "$ref": "#/$defs/severity"
+        }
+      }
+    },
+    "suppression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule", "reason"],
+      "properties": {
+        "rule": {
+          "$ref": "#/$defs/ruleCode"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional repository-relative glob."
+        },
+        "package": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional exact package identifier selector."
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "restoreSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 300
+        },
+        "evaluationSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3600,
+          "default": 60
+        }
+      }
+    }
+  }
+}

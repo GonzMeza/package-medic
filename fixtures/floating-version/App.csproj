@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <ProjectAssetsFile>$(MSBuildThisFileDirectory).assets/project.assets.json</ProjectAssetsFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Central.Float" />
+    <PackageReference Include="Direct.Float" Version="2.*" />
+    <PackageReference Include="Override.Float" VersionOverride="3.0.0-rc.*" />
+    <PackageReference Include="Fixed.Range" Version="[1.0,2.0)" />
+  </ItemGroup>
+</Project>

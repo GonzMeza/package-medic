@@ -1,21 +1,24 @@
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import process from 'node:process';
 import {
   annotationFor,
+  diagnosticsForAnnotations,
   enumValue,
   escapeCommandData,
   isolatedName,
   isWithin,
   normalizeActionInstance,
+  parseAnnotationMode,
   parseBoolean,
   renderSummary,
   reportDetails,
   resolveNugetSource,
   resolveOutputDirectory,
+  resolveOptionalWorkspaceFile,
   resolveScanPath,
+  runCommand,
   validateExactVersion,
 } from './lib.mjs';
 
@@ -27,14 +30,6 @@ function setOutput(name, value) {
 
 function appendSummary(markdown) {
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, markdown, 'utf8');
-}
-
-function command(executable, args, options = {}) {
-  const result = spawnSync(executable, args, { encoding: 'utf8', windowsHide: true, ...options });
-  if (result.stdout) process.stdout.write(result.stdout);
-  if (result.stderr) process.stderr.write(result.stderr);
-  if (result.error) throw result.error;
-  return Number.isInteger(result.status) ? result.status : 2;
 }
 
 function toolExecutable(toolDirectory) {
@@ -84,11 +79,20 @@ try {
   const version = validateExactVersion(process.env.PACKAGEMEDIC_TOOL_VERSION);
   const source = resolveNugetSource(workspace, runnerTemp, process.env.PACKAGEMEDIC_NUGET_SOURCE || 'https://api.nuget.org/v3/index.json');
   const restore = parseBoolean(process.env.PACKAGEMEDIC_RESTORE, 'restore');
-  const annotations = parseBoolean(process.env.PACKAGEMEDIC_ANNOTATIONS, 'annotations');
+  const annotationMode = parseAnnotationMode(process.env.PACKAGEMEDIC_ANNOTATIONS);
   parseBoolean(process.env.PACKAGEMEDIC_UPLOAD_SARIF, 'upload-sarif');
   parseBoolean(process.env.PACKAGEMEDIC_UPLOAD_ARTIFACT, 'upload-artifact');
-  const failOn = enumValue(process.env.PACKAGEMEDIC_FAIL_ON, 'fail-on', ['none', 'warning', 'error']);
+  const failOnInput = String(process.env.PACKAGEMEDIC_FAIL_ON ?? '').trim();
+  const failOn = failOnInput
+    ? enumValue(failOnInput, 'fail-on', ['none', 'warning', 'error'])
+    : undefined;
+  const failOnNewInput = String(process.env.PACKAGEMEDIC_FAIL_ON_NEW ?? '').trim();
+  const failOnNew = failOnNewInput
+    ? enumValue(failOnNewInput, 'fail-on-new', ['none', 'warning', 'error'])
+    : undefined;
   const verbosity = enumValue(process.env.PACKAGEMEDIC_VERBOSITY, 'verbosity', ['quiet', 'normal', 'detailed']);
+  const configFile = resolveOptionalWorkspaceFile(workspace, process.env.PACKAGEMEDIC_CONFIG, 'config');
+  const baselineFile = resolveOptionalWorkspaceFile(workspace, process.env.PACKAGEMEDIC_BASELINE, 'baseline');
 
   mkdirSync(outputDirectory, { recursive: true });
   const realWorkspace = realpathSync(workspace);
@@ -103,7 +107,7 @@ try {
   const toolDirectory = mkdtempSync(path.join(runnerTemp, `packagemedic-tool-${version}-`));
 
   mkdirSync(toolDirectory, { recursive: true });
-  const installExit = command('dotnet', [
+  const installExit = runCommand('dotnet', [
     'tool', 'install', '--tool-path', toolDirectory,
     'PackageMedic.Tool', '--version', version,
     '--source', source, '--no-http-cache',
@@ -115,9 +119,13 @@ try {
 
   const jsonFile = path.join(outputDirectory, 'packagemedic.json');
   const sarifFile = path.join(outputDirectory, 'packagemedic.sarif');
-  const baseArguments = ['doctor', scanPath, '--fail-on', failOn, '--verbosity', verbosity];
+  const baseArguments = ['doctor', scanPath, '--verbosity', verbosity];
+  if (failOn) baseArguments.push('--fail-on', failOn);
   if (!restore) baseArguments.push('--no-restore');
-  const scanExit = command(executable, [
+  if (configFile) baseArguments.push('--config', configFile);
+  if (baselineFile) baseArguments.push('--baseline', baselineFile);
+  if (failOnNew) baseArguments.push('--fail-on-new', failOnNew);
+  const scanExit = runCommand(executable, [
     ...baseArguments,
     '--format', 'json',
     '--output', jsonFile,
@@ -131,8 +139,10 @@ try {
     details = reportDetails(report);
   }
 
-  if (annotations && report) {
-    for (const diagnostic of details.diagnostics) process.stdout.write(`${annotationFor(diagnostic, workspace)}\n`);
+  if (report) {
+    for (const diagnostic of diagnosticsForAnnotations(details, annotationMode)) {
+      process.stdout.write(`${annotationFor(diagnostic, workspace)}\n`);
+    }
   }
 
   const reportsComplete = report && existsSync(sarifFile);

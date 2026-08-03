@@ -2,8 +2,22 @@ using System.Text.RegularExpressions;
 
 namespace PackageMedic.Core;
 
-public sealed partial class RestoreRunner(IProcessRunner processRunner)
+public sealed partial class RestoreRunner
 {
+    private readonly IProcessRunner processRunner;
+    private readonly TimeSpan timeout;
+
+    public RestoreRunner(IProcessRunner processRunner)
+        : this(processRunner, AnalysisExecutionOptions.Default.RestoreTimeout)
+    {
+    }
+
+    public RestoreRunner(IProcessRunner processRunner, TimeSpan timeout)
+    {
+        this.processRunner = processRunner ?? throw new ArgumentNullException(nameof(processRunner));
+        this.timeout = timeout;
+    }
+
     public async Task<(IReadOnlyList<Diagnostic> Diagnostics, IReadOnlyList<string> Errors)> RestoreAsync(
         DiscoveryResult discovery,
         Action<string>? progress,
@@ -15,11 +29,22 @@ public sealed partial class RestoreRunner(IProcessRunner processRunner)
         foreach (var target in discovery.RestoreTargets)
         {
             progress?.Invoke($"Running dotnet restore for {Path.GetFileName(target)} (configured NuGet feeds may be contacted)...");
-            var result = await processRunner.RunAsync(
-                "dotnet",
-                ["restore", target, "--nologo", "--verbosity", "minimal"],
-                Path.GetDirectoryName(target)!,
-                cancellationToken).ConfigureAwait(false);
+            using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutSource.CancelAfter(timeout);
+            ProcessResult result;
+            try
+            {
+                result = await processRunner.RunAsync(
+                    "dotnet",
+                    ["restore", target, "--nologo", "--verbosity", "minimal"],
+                    Path.GetDirectoryName(target)!,
+                    timeoutSource.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                errors.Add($"dotnet restore timed out for '{target}' after {timeout.TotalSeconds:0} seconds.");
+                continue;
+            }
 
             diagnostics.AddRange(ParseNuGetDiagnostics(result.CombinedOutput, target));
             if (result.ExitCode != 0)

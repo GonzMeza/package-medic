@@ -17,15 +17,23 @@ public sealed class PackageMedicAnalyzer
     private readonly DiagnosticEngine diagnosticEngine;
 
     public PackageMedicAnalyzer()
-        : this(new ProcessRunner())
+        : this(new ProcessRunner(), AnalysisExecutionOptions.Default)
     {
     }
 
     public PackageMedicAnalyzer(IProcessRunner processRunner)
+        : this(processRunner, AnalysisExecutionOptions.Default)
     {
+    }
+
+    public PackageMedicAnalyzer(IProcessRunner processRunner, AnalysisExecutionOptions executionOptions)
+    {
+        ArgumentNullException.ThrowIfNull(processRunner);
+        ArgumentNullException.ThrowIfNull(executionOptions);
+        executionOptions.Validate();
         discovery = new ProjectDiscovery();
-        restoreRunner = new RestoreRunner(processRunner);
-        evaluator = new MsBuildProjectEvaluator(processRunner);
+        restoreRunner = new RestoreRunner(processRunner, executionOptions.RestoreTimeout);
+        evaluator = new MsBuildProjectEvaluator(processRunner, executionOptions.MsBuildEvaluationTimeout);
         assetsReader = new AssetsFileReader();
         diagnosticEngine = new DiagnosticEngine();
     }

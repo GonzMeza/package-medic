@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Text.Json;
 using PackageMedic.Core;
 
@@ -94,5 +95,74 @@ public sealed class InfrastructureTests
         Assert.DoesNotContain("xyz789", redacted, StringComparison.Ordinal);
         Assert.Contains("https://[REDACTED]@packages.example.test", redacted, StringComparison.Ordinal);
         Assert.Contains("token=[REDACTED]", redacted, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ProcessOutputIsBoundedWhileTheStreamIsFullyConsumed()
+    {
+        using var reader = new StringReader(new string('x', 64));
+
+        var output = await ProcessRunner.ReadBoundedAsync(reader, 16, CancellationToken.None);
+
+        Assert.StartsWith(new string('x', 16), output, StringComparison.Ordinal);
+        Assert.Contains("subprocess output truncated", output, StringComparison.Ordinal);
+        Assert.True(output.Length < 128);
+    }
+
+    [Fact]
+    public void AnalysisExecutionTimeoutsRejectUnsafeValues()
+    {
+        var options = new AnalysisExecutionOptions(TimeSpan.Zero, TimeSpan.FromMinutes(1));
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => options.Validate());
+    }
+
+    [Fact]
+    public void ProcessTerminationRecognizesDocumentedPlatformFailures()
+    {
+        Assert.True(ProcessRunner.IsExpectedTerminationException(new InvalidOperationException()));
+        Assert.True(ProcessRunner.IsExpectedTerminationException(new Win32Exception()));
+        Assert.True(ProcessRunner.IsExpectedTerminationException(new NotSupportedException()));
+        Assert.True(ProcessRunner.IsExpectedTerminationException(new AggregateException()));
+        Assert.False(ProcessRunner.IsExpectedTerminationException(new IOException()));
+    }
+
+    [Fact]
+    public async Task RestoreTimeoutBecomesAnOperationalErrorInsteadOfHanging()
+    {
+        var target = Path.Combine(Path.GetTempPath(), "PackageMedic.Timeout", "App.csproj");
+        var discovery = new DiscoveryResult(target, [], [target], [target]);
+        var runner = new RestoreRunner(new NeverCompletesProcessRunner(), TimeSpan.FromMilliseconds(25));
+
+        var result = await runner.RestoreAsync(discovery, null, CancellationToken.None);
+
+        Assert.Empty(result.Diagnostics);
+        Assert.Contains(result.Errors, item => item.Contains("timed out", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task EvaluationTimeoutIsReportedWithProjectContext()
+    {
+        var target = Path.Combine(Path.GetTempPath(), "PackageMedic.Timeout", "App.csproj");
+        var evaluator = new MsBuildProjectEvaluator(new NeverCompletesProcessRunner(), TimeSpan.FromMilliseconds(25));
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => evaluator.EvaluateAsync(target, CancellationToken.None));
+
+        Assert.Contains("timed out", exception.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(target, exception.Message, StringComparison.Ordinal);
+    }
+
+    private sealed class NeverCompletesProcessRunner : IProcessRunner
+    {
+        public async Task<ProcessResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            string workingDirectory,
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            throw new InvalidOperationException("Unreachable.");
+        }
     }
 }

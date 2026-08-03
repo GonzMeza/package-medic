@@ -11,8 +11,8 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>packagemedic-icon.png</PackageIcon>
     <PackageProjectUrl>https://github.com/GonzMeza/package-medic</PackageProjectUrl>
-    <PackageReleaseNotes>PackageMedic 0.2 stable release with deterministic SARIF 2.1.0, single-analysis JSON and SARIF reports, atomic report files, native GitHub annotations, Code Scanning integration, and the existing read-only PM001-PM005 diagnostics. Full notes: https://github.com/GonzMeza/package-medic/blob/v$(PackageMedicVersion)/CHANGELOG.md</PackageReleaseNotes>
-    <PackageTags>dotnet;nuget;dependencies;msbuild;central-package-management;dotnet-tool;sarif;github-actions;code-scanning;ci</PackageTags>
+    <PackageReleaseNotes>PackageMedic 0.3 adds team policy configuration, justified suppressions, deterministic baselines with new/existing/resolved states, fail-on-new CI gating, PM006 floating-version detection, rule discovery, bounded process execution, and read-only clean plans. Full notes: https://github.com/GonzMeza/package-medic/blob/v$(PackageMedicVersion)/CHANGELOG.md</PackageReleaseNotes>
+    <PackageTags>dotnet;nuget;dependencies;msbuild;central-package-management;dotnet-tool;sarif;github-actions;code-scanning;ci;baseline;dependency-policy</PackageTags>
     <Description>A read-only dependency doctor for SDK-style .NET projects.</Description>
     <Title>PackageMedic</Title>
   </PropertyGroup>

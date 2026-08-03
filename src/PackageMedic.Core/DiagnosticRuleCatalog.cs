@@ -50,6 +50,13 @@ public static class DiagnosticRuleCatalog
             "A NuGet warning or error was reported by restore or recorded in project.assets.json.",
             $"{DiagnosticHelpBaseUri}#pm005--nugetrestoreproblem",
             DiagnosticSeverity.Warning),
+        new(
+            "PM006",
+            "FloatingPackageVersion",
+            "Package uses a floating NuGet version",
+            "A PackageVersion, PackageReference, or VersionOverride uses a floating NuGet version that can resolve differently as packages are published.",
+            $"{DiagnosticHelpBaseUri}#pm006--floatingpackageversion",
+            DiagnosticSeverity.Warning),
     ];
 
     private static readonly IReadOnlyDictionary<string, DiagnosticRuleMetadata> RulesByCode =

@@ -11,7 +11,18 @@ const metadata = readFileSync(metadataPath, 'utf8');
 test('action metadata declares a composite action and public contract', () => {
   assert.match(metadata, /^name:\s+PackageMedic$/m);
   assert.match(metadata, /^\s+using:\s+composite$/m);
-  for (const input of ['path', 'tool-version', 'restore', 'fail-on', 'annotations', 'upload-sarif', 'upload-artifact']) {
+  for (const input of [
+    'path',
+    'tool-version',
+    'restore',
+    'fail-on',
+    'fail-on-new',
+    'config',
+    'baseline',
+    'annotations',
+    'upload-sarif',
+    'upload-artifact',
+  ]) {
     assert.match(metadata, new RegExp(`^  ${input}:$`, 'm'));
   }
   for (const output of ['exit-code', 'json-file', 'sarif-file', 'errors', 'warnings', 'information', 'artifact-name', 'sarif-category']) {
@@ -27,6 +38,11 @@ test('action metadata declares a composite action and public contract', () => {
 test('action creates JSON and SARIF from one PackageMedic analysis', () => {
   const runner = readFileSync(path.join(repository, 'action', 'run.mjs'), 'utf8');
   assert.match(runner, /'--format', 'json',[\s\S]*'--sarif-output', sarifFile/);
+  assert.match(runner, /baseArguments\.push\('--config', configFile\)/);
+  assert.match(runner, /baseArguments\.push\('--baseline', baselineFile\)/);
+  assert.match(runner, /baseArguments\.push\('--fail-on-new', failOnNew\)/);
+  assert.match(runner, /runCommand\(executable/);
+  assert.doesNotMatch(runner, /spawnSync|result\.stdout|result\.stderr/);
   assert.doesNotMatch(runner, /sarifArguments|sarifExit/);
 });
 

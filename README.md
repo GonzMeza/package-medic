@@ -1,4 +1,4 @@
-![PackageMedic logo](https://raw.githubusercontent.com/GonzMeza/package-medic/v0.1.0/assets/brand/packagemedic-logo.png)
+![PackageMedic logo](https://raw.githubusercontent.com/GonzMeza/package-medic/v0.3.0/assets/brand/packagemedic-logo.png)
 
 # PackageMedic
 
@@ -8,11 +8,11 @@
 [![NuGet downloads](https://img.shields.io/nuget/dt/PackageMedic.Tool.svg)](https://www.nuget.org/packages/PackageMedic.Tool)
 [![CI status](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml/badge.svg)](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml)
 [![MIT license](https://img.shields.io/github/license/GonzMeza/package-medic)](LICENSE)
-[![Stable status](https://img.shields.io/badge/status-stable%200.2.0-brightgreen)](https://github.com/GonzMeza/package-medic/releases)
+[![Stable status](https://img.shields.io/badge/status-stable%200.3.0-brightgreen)](https://github.com/GonzMeza/package-medic/releases)
 
-PackageMedic 0.2 is the CI-focused stable release of the read-only dependency doctor for SDK-style .NET projects. It finds stale Central Package Management entries, version drift, CPM bypasses, duplicate central versions, and important NuGet restore problems—then explains what to review through text, JSON, SARIF, and GitHub annotations.
+PackageMedic 0.3 is the team-adoption release of the read-only dependency doctor for SDK-style .NET projects. It adds repository policy, justified suppressions, deterministic baselines, new-only CI gates, and floating-version detection to the existing text, JSON, SARIF, and GitHub workflow.
 
-> **Important:** PackageMedic 0.2 remains read-only. Review every diagnostic before changing dependency declarations.
+> **Important:** PackageMedic 0.3 remains read-only. Even `clean` only produces a dry-run plan; review every diagnostic before changing dependency declarations.
 
 PackageMedic is not affiliated with, maintained by, sponsored by, or endorsed by Microsoft. .NET, NuGet, and related names are trademarks of their respective owners.
 
@@ -30,10 +30,10 @@ Install the latest stable release from NuGet:
 dotnet tool install --global PackageMedic.Tool
 ```
 
-Install PackageMedic 0.2 explicitly:
+Install PackageMedic 0.3 explicitly:
 
 ```console
-dotnet tool install --global PackageMedic.Tool --version 0.2.0
+dotnet tool install --global PackageMedic.Tool --version 0.3.0
 ```
 
 Update an existing installation:
@@ -70,6 +70,10 @@ package-medic doctor ./src/MyProject/MyProject.csproj
 package-medic doctor ./MySolution.sln
 package-medic doctor ./MySolution.slnx
 package-medic doctor ./src
+package-medic init
+package-medic rules
+package-medic explain PM006
+package-medic clean . --dry-run
 ```
 
 The path is optional and defaults to the current directory.
@@ -79,7 +83,13 @@ The path is optional and defaults to the current directory.
 --format text|json|sarif
 --output, -o <path>
 --sarif-output <path>
+--config <path>
+--no-config
+--baseline <path>
 --fail-on none|warning|error
+--fail-on-new none|warning|error
+--restore-timeout <seconds>
+--evaluation-timeout <seconds>
 --verbosity quiet|normal|detailed
 --version
 --help
@@ -102,13 +112,62 @@ package-medic doctor . --format sarif --output artifacts/packagemedic.sarif
 
 # Produce JSON and SARIF from one analysis
 package-medic doctor . --format json --output artifacts/packagemedic.json --sarif-output artifacts/packagemedic.sarif
+
+# Gate only diagnostics that were not accepted into the baseline
+package-medic doctor . --baseline .packagemedic-baseline.json --fail-on none --fail-on-new warning
 ```
 
 Restore progress is written to standard error, so standard output remains valid JSON or SARIF. `--output` atomically writes the selected format, while `--sarif-output` can additionally write SARIF from that same in-memory analysis. PackageMedic creates destination directories and never mixes progress into report files.
 
+## Team policy
+
+Run `package-medic init` to create `.packagemedic.json`. The CLI searches from the selected target to the repository root; `--config` selects an explicit file and `--no-config` disables discovery. Command-line values take precedence over configuration, which takes precedence over safe defaults.
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/GonzMeza/package-medic/main/schemas/packagemedic.schema.json",
+  "schemaVersion": 1,
+  "failOn": "none",
+  "failOnNew": "warning",
+  "baseline": ".packagemedic-baseline.json",
+  "exclude": ["**/bin/**", "**/obj/**"],
+  "rules": {
+    "PM006": { "enabled": true, "severity": "warning" }
+  },
+  "suppressions": [
+    {
+      "rule": "PM003",
+      "path": "src/Legacy/**",
+      "package": "Example.Legacy",
+      "reason": "Intentional exception tracked in issue 42"
+    }
+  ],
+  "timeouts": { "restoreSeconds": 300, "evaluationSeconds": 60 }
+}
+```
+
+Every suppression requires a reason. Suppressed, excluded, and disabled findings are removed from failure thresholds but remain counted in report policy metadata; suppression reasons are preserved in `suppressedDiagnostics` and detailed text output.
+
+## Baselines and gradual adoption
+
+Create a deterministic baseline after reviewing the current findings:
+
+```console
+package-medic baseline create . --output .packagemedic-baseline.json
+package-medic doctor . --baseline .packagemedic-baseline.json --fail-on none --fail-on-new warning
+```
+
+Current diagnostics are classified as `new` or `existing`; baseline entries no longer present are counted as `resolved` and listed in JSON `resolvedDiagnostics`. Refresh the accepted state explicitly with:
+
+```console
+package-medic baseline update . --baseline .packagemedic-baseline.json
+```
+
+Baselines use the same portable fingerprint as SARIF, contain no timestamps, and are stable across repository locations and source-line movement.
+
 ## CI and SARIF
 
-PackageMedic 0.2 maps PM001–PM005 to deterministic SARIF 2.1.0 with repository-relative locations, stable fingerprints, rule help links, confidence, and original NuGet codes. SARIF can be consumed by GitHub Code Scanning or any compatible CI system.
+PackageMedic 0.3 maps PM001–PM006 to deterministic SARIF 2.1.0 with repository-relative locations, stable fingerprints, standard baseline states, rule help links, confidence, and original NuGet codes. SARIF can be consumed by GitHub Code Scanning or any compatible CI system.
 
 The official GitHub Action installs the PackageMedic version associated with its tag, emits native file annotations, writes a job summary, preserves the CLI exit-code contract, and can upload the SARIF report after the scan.
 
@@ -119,11 +178,14 @@ permissions:
 
 steps:
   - uses: actions/checkout@v6
-  - uses: GonzMeza/package-medic@v0.2.0
+  - uses: GonzMeza/package-medic@v0.3.0
     with:
       path: .
-      fail-on: warning
-      annotations: 'true'
+      config: .packagemedic.json
+      baseline: .packagemedic-baseline.json
+      fail-on: none
+      fail-on-new: warning
+      annotations: new
       upload-sarif: 'true'
 ```
 
@@ -138,12 +200,13 @@ Repositories without GitHub Code Scanning can disable `upload-sarif`; native ann
 | PM003 | warning | A `PackageReference` uses `Version` while CPM is enabled; intentional `VersionOverride` is respected. |
 | PM004 | error | Multiple effective central entries define the same package for a project. |
 | PM005 | NuGet level | Restore or `project.assets.json` contains an important NU warning/error such as NU1605, NU1107, or NU1109. |
+| PM006 | warning | A `PackageVersion`, `PackageReference Version`, or `VersionOverride` uses a documented NuGet floating pattern. |
 
-Every diagnostic includes an explanation, evidence, affected project/scope, source location when available, a suggested action, and confidence where relevant. See [the diagnostic reference](docs/diagnostics/README.md) and [the SARIF contract](docs/sarif.md).
+Every diagnostic includes an explanation, evidence, affected project/scope, source location when available, a suggested action, and confidence where relevant. Use `package-medic rules` to list rules or `package-medic explain PM006` for one rule. See [the diagnostic reference](docs/diagnostics/README.md) and [the SARIF contract](docs/sarif.md).
 
 ## JSON and exit codes
 
-JSON output is stable, camel-cased, and contains `version`, `target`, scan `summary`, `diagnostics`, and `analysisErrors`. SARIF uses version 2.1.0. Both machine-readable formats are deterministically ordered and never contain timestamps.
+JSON output is stable, camel-cased, and keeps the 0.2 fields `version`, `target`, scan `summary`, `diagnostics`, and `analysisErrors`. Its independent `schemaVersion` is `1`; 0.3 adds policy/baseline summaries, diagnostic fingerprints/states, and justified suppression details. SARIF uses version 2.1.0. Both formats are deterministically ordered and never contain timestamps.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -159,7 +222,8 @@ JSON output is stable, camel-cased, and contains `version`, `target`, scan `summ
 - PackageMedic does not call remote services itself.
 - `dotnet restore` can contact feeds from the user's NuGet configuration unless `--no-restore` is used.
 - Common credential-shaped values in subprocess output are redacted before display.
-- The MVP performs no dependency-file mutations and offers no apply/fix command.
+- Subprocess output is bounded, restore/evaluation timeouts are configurable, and cancellation terminates the process tree.
+- `clean --dry-run` only lists PM001 candidates. Version 0.3 offers no apply/fix command.
 
 ## Current limitations
 
@@ -167,6 +231,7 @@ JSON output is stable, camel-cased, and contains `version`, `target`, scan `summ
 - The installed SDK must support MSBuild's evaluated `-getProperty`/`-getItem` JSON output and the target project's SDK.
 - PackageMedic favors avoiding false positives: dynamically generated or unsafe-to-evaluate conditions may result in no diagnostic.
 - PM001 reasons over effective evaluated central items, direct references, and the existing resolved graph; it does not speculate about packages used only by source code reflection or custom build logic.
+- PM006 ignores unresolved MSBuild expressions and only recognizes documented floating-version forms; it is not an update recommender.
 - Restore failures are reported and return exit code `2`; PackageMedic does not replace NuGet restore.
 - No vulnerability scanning, automatic fixes, IDE extension, or desktop UI is included yet.
 
@@ -185,9 +250,9 @@ See [architecture.md](docs/architecture.md) for the execution boundary and desig
 
 ## Roadmap
 
-After the CI-focused 0.2 release is proven:
+Candidates after the team-adoption 0.3 release is proven:
 
-- `clean --dry-run` and an explicitly gated `clean --apply`
+- an explicitly gated `clean --apply`
 - dependency diffs against a Git ref
 - assisted NU1605 repair and CPM migration
 - vulnerability analysis

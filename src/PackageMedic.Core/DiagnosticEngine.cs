@@ -14,6 +14,7 @@ public sealed class DiagnosticEngine
         diagnostics.AddRange(FindVersionDrift(projects));
         diagnostics.AddRange(FindCentralBypasses(projects));
         diagnostics.AddRange(FindDuplicateCentralVersions(projects));
+        diagnostics.AddRange(FindFloatingPackageVersions(projects));
         diagnostics.AddRange(projects.SelectMany(project => project.AssetDiagnostics));
 
         return diagnostics
@@ -173,6 +174,81 @@ public sealed class DiagnosticEngine
             }
         }
     }
+
+    private static IEnumerable<Diagnostic> FindFloatingPackageVersions(IReadOnlyList<ProjectAnalysis> projects)
+    {
+        var emitted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var project in projects)
+        {
+            foreach (var package in project.DirectPackages)
+            {
+                var usesOverride = !string.IsNullOrWhiteSpace(package.VersionOverride);
+                var version = usesOverride ? package.VersionOverride : package.Version;
+                if (!FloatingVersionDetector.IsFloating(version))
+                {
+                    continue;
+                }
+
+                var metadataName = usesOverride ? "VersionOverride" : "Version";
+                var signature = $"PackageReference|{package.SourceFile}|{package.Line}|{package.Id}|{metadataName}|{version}";
+                if (!emitted.Add(signature))
+                {
+                    continue;
+                }
+
+                yield return CreateFloatingVersionDiagnostic(
+                    project.ProjectPath,
+                    package.SourceFile,
+                    package.Line,
+                    "PackageReference",
+                    package.Id,
+                    metadataName,
+                    version!);
+            }
+
+            foreach (var package in project.CentralVersions)
+            {
+                if (!FloatingVersionDetector.IsFloating(package.Version))
+                {
+                    continue;
+                }
+
+                var signature = $"PackageVersion|{package.SourceFile}|{package.Line}|{package.Id}|Version|{package.Version}";
+                if (!emitted.Add(signature))
+                {
+                    continue;
+                }
+
+                yield return CreateFloatingVersionDiagnostic(
+                    project.ProjectPath,
+                    package.SourceFile,
+                    package.Line,
+                    "PackageVersion",
+                    package.Id,
+                    "Version",
+                    package.Version);
+            }
+        }
+    }
+
+    private static Diagnostic CreateFloatingVersionDiagnostic(
+        string project,
+        string sourceFile,
+        int? line,
+        string itemName,
+        string packageId,
+        string metadataName,
+        string version) => new(
+            "PM006",
+            DiagnosticSeverity.Warning,
+            "Package uses a floating NuGet version",
+            $"'{packageId}' uses {metadataName}='{version}', which can resolve to a different package as new versions are published.",
+            project,
+            sourceFile,
+            line,
+            $"{itemName} {packageId} has floating {metadataName}='{version}'.",
+            "Pin an exact version or an intentionally bounded non-floating range, then review the dependency update policy.",
+            DiagnosticConfidence.High);
 
     private static bool PackageEquals(string left, string right) => left.Equals(right, StringComparison.OrdinalIgnoreCase);
 

@@ -348,6 +348,173 @@ public sealed class CliIntegrationTests
         }
     }
 
+    [Fact]
+    public async Task RulesAndExplainExposeTheDiagnosticCatalog()
+    {
+        var rules = await RunAsync("rules");
+        var explanation = await RunAsync("explain", "PM006");
+
+        Assert.Equal(0, rules.ExitCode);
+        Assert.Contains("PM006", rules.Output, StringComparison.Ordinal);
+        Assert.Contains("FloatingPackageVersion", rules.Output, StringComparison.Ordinal);
+        Assert.Equal(0, explanation.ExitCode);
+        Assert.Contains("floating", explanation.Output, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task InitCreatesAValidConfigurationWithoutOverwritingByDefault()
+    {
+        var directory = Directory.CreateTempSubdirectory("PackageMedic.Init.");
+        try
+        {
+            var created = await RunAsync("init", directory.FullName);
+            var repeated = await RunAsync("init", directory.FullName);
+            var configurationPath = Path.Combine(directory.FullName, ".packagemedic.json");
+
+            Assert.Equal(0, created.ExitCode);
+            Assert.Equal(2, repeated.ExitCode);
+            var configuration = PackageMedicConfigurationLoader.Load(configurationPath);
+            Assert.Equal(PackageMedicConfiguration.CurrentSchemaVersion, configuration.SchemaVersion);
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task InitTreatsAnExistingJsonNamedDirectoryAsADirectory()
+    {
+        var root = Directory.CreateTempSubdirectory("PackageMedic.InitJsonDirectory.");
+        try
+        {
+            var directory = Directory.CreateDirectory(Path.Combine(root.FullName, "settings.json"));
+
+            var result = await RunAsync("init", directory.FullName);
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.True(File.Exists(Path.Combine(directory.FullName, ".packagemedic.json")));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task ConfigurationCanSuppressAWarningWithAVisibleReason()
+    {
+        var configurationPath = Path.Combine(Path.GetTempPath(), $"PackageMedic.{Guid.NewGuid():N}.json");
+        try
+        {
+            await File.WriteAllTextAsync(
+                configurationPath,
+                """
+                {
+                  "schemaVersion": 1,
+                  "failOn": "warning",
+                  "suppressions": [
+                    { "rule": "PM001", "reason": "Accepted until the next dependency cleanup" }
+                  ]
+                }
+                """);
+
+            var result = await RunAsync(
+                "doctor", Fixture("unused-central"), "--no-restore", "--config", configurationPath,
+                "--format", "json", "--verbosity", "quiet");
+
+            Assert.Equal(0, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            Assert.Empty(json.RootElement.GetProperty("diagnostics").EnumerateArray());
+            Assert.Equal(1, json.RootElement.GetProperty("policy").GetProperty("suppressed").GetInt32());
+            Assert.Contains(
+                "Accepted until",
+                json.RootElement.GetProperty("suppressedDiagnostics")[0].GetProperty("reason").GetString(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            File.Delete(configurationPath);
+        }
+    }
+
+    [Fact]
+    public async Task BaselineMakesKnownDiagnosticsExistingAndFailOnNewPasses()
+    {
+        var baselinePath = Path.Combine(Path.GetTempPath(), $"PackageMedic.{Guid.NewGuid():N}.baseline.json");
+        try
+        {
+            var created = await RunAsync(
+                "baseline", "create", Fixture("unused-central"), "--no-restore", "--output", baselinePath);
+            var compared = await RunAsync(
+                "doctor", Fixture("unused-central"), "--no-restore", "--baseline", baselinePath,
+                "--fail-on", "none", "--fail-on-new", "warning", "--format", "json", "--verbosity", "quiet");
+            var resolved = await RunAsync(
+                "doctor", Fixture("clean", "Clean.slnx"), "--no-restore", "--baseline", baselinePath,
+                "--fail-on", "none", "--format", "json", "--verbosity", "quiet");
+            var updated = await RunAsync(
+                "baseline", "update", Fixture("unused-central"), "--no-restore", "--baseline", baselinePath);
+
+            Assert.Equal(0, created.ExitCode);
+            Assert.Equal(0, compared.ExitCode);
+            Assert.Equal(0, resolved.ExitCode);
+            Assert.Equal(0, updated.ExitCode);
+            using var json = JsonDocument.Parse(compared.Output);
+            Assert.True(json.RootElement.GetProperty("baseline").GetProperty("existing").GetInt32() > 0);
+            Assert.Equal(0, json.RootElement.GetProperty("baseline").GetProperty("new").GetInt32());
+            Assert.All(
+                json.RootElement.GetProperty("diagnostics").EnumerateArray(),
+                item => Assert.Equal("existing", item.GetProperty("baselineState").GetString()));
+            using var resolvedJson = JsonDocument.Parse(resolved.Output);
+            Assert.True(resolvedJson.RootElement.GetProperty("baseline").GetProperty("resolved").GetInt32() > 0);
+            Assert.NotEmpty(resolvedJson.RootElement.GetProperty("resolvedDiagnostics").EnumerateArray());
+        }
+        finally
+        {
+            File.Delete(baselinePath);
+        }
+    }
+
+    [Fact]
+    public async Task InvalidBaselineIsAHandledOperationalError()
+    {
+        var baselinePath = Path.Combine(Path.GetTempPath(), $"PackageMedic.{Guid.NewGuid():N}.invalid-baseline.json");
+        try
+        {
+            await File.WriteAllTextAsync(
+                baselinePath,
+                """
+                { "schemaVersion": 2, "toolVersion": "0.3.0", "entries": [] }
+                """);
+
+            var result = await RunAsync(
+                "doctor", Fixture("clean", "Clean.slnx"), "--no-restore", "--no-config",
+                "--baseline", baselinePath, "--format", "json", "--verbosity", "quiet");
+
+            Assert.Equal(2, result.ExitCode);
+            Assert.Equal(string.Empty, result.Output);
+            Assert.Contains("Unsupported baseline schemaVersion", result.Error, StringComparison.Ordinal);
+            Assert.DoesNotContain("Unhandled exception", result.Error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            File.Delete(baselinePath);
+        }
+    }
+
+    [Fact]
+    public async Task CleanOnlyProducesAnExplicitDryRunPlan()
+    {
+        var rejected = await RunAsync("clean", Fixture("unused-central"), "--no-restore");
+        var planned = await RunAsync("clean", Fixture("unused-central"), "--no-restore", "--dry-run");
+
+        Assert.Equal(2, rejected.ExitCode);
+        Assert.Equal(0, planned.ExitCode);
+        Assert.Contains("No dependency files were modified", planned.Output, StringComparison.Ordinal);
+        Assert.Contains("Would review/remove", planned.Output, StringComparison.Ordinal);
+        Assert.Contains("apply is intentionally unavailable", planned.Output, StringComparison.Ordinal);
+    }
+
     private static async Task<CliResult> RunAsync(params string[] arguments)
     {
         using var output = new StringWriter();

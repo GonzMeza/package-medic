@@ -5,7 +5,17 @@ namespace PackageMedic.Cli;
 public static class TextResultWriter
 {
     public static async Task WriteAsync(AnalysisResult result, OutputVerbosity verbosity, TextWriter writer)
+        => await WriteAsync(result, verbosity, writer, null).ConfigureAwait(false);
+
+    public static async Task WriteAsync(
+        AnalysisResult result,
+        OutputVerbosity verbosity,
+        TextWriter writer,
+        AnalysisReportContext? context)
     {
+        var baselineStates = context?.Baseline.Current
+            .GroupBy(item => item.Diagnostic)
+            .ToDictionary(group => group.Key, group => group.First().State);
         if (verbosity != OutputVerbosity.Quiet)
         {
             await writer.WriteLineAsync($"PackageMedic {result.Version}").ConfigureAwait(false);
@@ -18,7 +28,8 @@ public static class TextResultWriter
 
             foreach (var diagnostic in result.Diagnostics)
             {
-                await WriteDiagnosticAsync(diagnostic, verbosity, writer).ConfigureAwait(false);
+                var state = baselineStates?.GetValueOrDefault(diagnostic);
+                await WriteDiagnosticAsync(diagnostic, verbosity, writer, state).ConfigureAwait(false);
             }
 
             if (result.AnalysisErrors.Count > 0)
@@ -35,13 +46,33 @@ public static class TextResultWriter
         await writer.WriteLineAsync().ConfigureAwait(false);
         await writer.WriteLineAsync(
             $"Summary: {result.Summary.Errors} errors, {result.Summary.Warnings} warnings, {result.Summary.Information} informational").ConfigureAwait(false);
+        if (context is not null)
+        {
+            await writer.WriteLineAsync(
+                $"Baseline: {context.Baseline.NewCount} new, {context.Baseline.ExistingCount} existing, {context.Baseline.ResolvedCount} resolved").ConfigureAwait(false);
+            await writer.WriteLineAsync(
+                $"Policy: {context.PolicyApplication.SuppressedDiagnostics.Count} suppressed, {context.PolicyApplication.ExcludedDiagnostics.Count} excluded, {context.PolicyApplication.DisabledDiagnostics.Count} disabled").ConfigureAwait(false);
+            if (verbosity == OutputVerbosity.Detailed)
+            {
+                foreach (var suppressed in context.PolicyApplication.SuppressedDiagnostics)
+                {
+                    await writer.WriteLineAsync(
+                        $"  Suppressed {suppressed.Diagnostic.Code}: {suppressed.Suppression.Reason}").ConfigureAwait(false);
+                }
+            }
+        }
     }
 
-    private static async Task WriteDiagnosticAsync(Diagnostic diagnostic, OutputVerbosity verbosity, TextWriter writer)
+    private static async Task WriteDiagnosticAsync(
+        Diagnostic diagnostic,
+        OutputVerbosity verbosity,
+        TextWriter writer,
+        BaselineDiagnosticState? baselineState)
     {
         await writer.WriteLineAsync().ConfigureAwait(false);
         var originalCode = diagnostic.OriginalCode is null ? string.Empty : $" ({diagnostic.OriginalCode})";
-        await writer.WriteLineAsync($"{diagnostic.Code}{originalCode} {diagnostic.Severity.ToString().ToLowerInvariant()}: {diagnostic.Title}").ConfigureAwait(false);
+        var state = baselineState is null ? string.Empty : $" [{baselineState.ToString()!.ToLowerInvariant()}]";
+        await writer.WriteLineAsync($"{diagnostic.Code}{originalCode}{state} {diagnostic.Severity.ToString().ToLowerInvariant()}: {diagnostic.Title}").ConfigureAwait(false);
         await writer.WriteLineAsync().ConfigureAwait(false);
         if (!string.IsNullOrWhiteSpace(diagnostic.Project))
         {

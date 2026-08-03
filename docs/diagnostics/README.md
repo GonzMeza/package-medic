@@ -29,3 +29,9 @@ Consolidate the entries into one unambiguous central version for that scope.
 Wraps warning/error NU codes captured from `dotnet restore` or stored in `project.assets.json`. The original code is preserved in `originalCode`, and the diagnostic uses NuGet's severity.
 
 Resolve the original NuGet issue using its code and evidence. A failed restore is also an operational error and returns exit code `2`.
+
+## PM006 — FloatingPackageVersion
+
+Emitted when an evaluated `PackageVersion`, `PackageReference Version`, or `VersionOverride` uses a documented NuGet floating pattern such as `*`, `1.*`, `1.2.*`, `1.2.3-*`, or `1.2.3-rc.*`.
+
+Fixed versions and fixed ranges are not reported. Unresolved MSBuild expressions such as `$(PackageVersion)` are ignored rather than guessed, keeping the rule conservative. Pin an exact version or a deliberate fixed range when reproducible restores are required.
