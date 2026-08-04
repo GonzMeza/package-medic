@@ -78,7 +78,7 @@ package-medic doctor . \
 
       <PageLinks
         previous={{ href: "/docs/configuration", label: "Configuration" }}
-        next={{ href: "/docs/github-action", label: "GitHub Action" }}
+        next={{ href: "/docs/impact-gate", label: "Impact Gate" }}
       />
     </DocPage>
   );

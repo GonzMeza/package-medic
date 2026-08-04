@@ -7,6 +7,7 @@ namespace PackageMedic.Core;
 public sealed partial class ProjectDiscovery
 {
     internal const long MaximumSolutionFileBytes = 64L * 1024 * 1024;
+    internal const int MaximumProjects = 10_000;
 
     private static readonly string[] IgnoredDirectoryNames =
     [
@@ -21,6 +22,7 @@ public sealed partial class ProjectDiscovery
         ".next",
         ".vinext",
         ".wrangler",
+        ".packagemedic-time-machine",
         "dist",
         "out",
     ];
@@ -56,6 +58,8 @@ public sealed partial class ProjectDiscovery
                     throw new InvalidOperationException($"No C# projects were found in solution '{target}'.");
                 }
 
+                EnsureProjectCount(projects.Count);
+
                 return new DiscoveryResult(target, [target], projects, [target]);
             }
 
@@ -79,11 +83,37 @@ public sealed partial class ProjectDiscovery
             throw new InvalidOperationException($"No .csproj files were found under '{target}'.");
         }
 
-        IReadOnlyList<string> restoreTargets = solutions.Length == 1 ? solutions : projectsInDirectory;
+        EnsureProjectCount(projectsInDirectory.Length);
+
+        IReadOnlyList<string> restoreTargets;
+        if (solutions.Length == 1)
+        {
+            var solutionProjects = ReadSolutionProjects(solutions[0], target)
+                .ToHashSet(OperatingSystem.IsWindows()
+                    ? StringComparer.OrdinalIgnoreCase
+                    : StringComparer.Ordinal);
+            restoreTargets = solutions
+                .Concat(projectsInDirectory.Where(project => !solutionProjects.Contains(project)))
+                .ToArray();
+        }
+        else
+        {
+            restoreTargets = projectsInDirectory;
+        }
+
         return new DiscoveryResult(target, solutions, projectsInDirectory, restoreTargets)
         {
             Errors = scan.Errors,
         };
+    }
+
+    private static void EnsureProjectCount(int count)
+    {
+        if (count > MaximumProjects)
+        {
+            throw new InvalidDataException(
+                $"The selected analysis contains {count} projects, exceeding the {MaximumProjects}-project safety limit.");
+        }
     }
 
     private static IReadOnlyList<string> ReadSolutionProjects(string solutionPath, string? containmentRoot)
@@ -283,7 +313,7 @@ public sealed partial class ProjectDiscovery
         }
     }
 
-    private static bool IsSafelyContained(string root, string candidate)
+    public static bool IsSafelyContained(string root, string candidate)
     {
         var normalizedRoot = Path.GetFullPath(root);
         var normalizedCandidate = Path.GetFullPath(candidate);

@@ -2,6 +2,22 @@ using System.Text.RegularExpressions;
 
 namespace PackageMedic.Core;
 
+public enum RestoreProcessFailureKind
+{
+    None,
+    Rejected,
+    TimedOut,
+    OutputLimitExceeded,
+}
+
+public sealed record RestoreExecutionResult(
+    IReadOnlyList<Diagnostic> Diagnostics,
+    IReadOnlyList<string> Errors,
+    RestoreProcessFailureKind FailureKind)
+{
+    public bool Succeeded => FailureKind == RestoreProcessFailureKind.None && Errors.Count == 0;
+}
+
 public sealed partial class RestoreRunner
 {
     private readonly IProcessRunner processRunner;
@@ -43,39 +59,80 @@ public sealed partial class RestoreRunner
     public async Task<(IReadOnlyList<Diagnostic> Diagnostics, IReadOnlyList<string> Errors)> RestoreAsync(
         DiscoveryResult discovery,
         Action<string>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool forceEvaluate = false,
+        string? packagesDirectory = null)
     {
+        var result = await RestoreDetailedAsync(
+            discovery,
+            progress,
+            cancellationToken,
+            forceEvaluate,
+            packagesDirectory).ConfigureAwait(false);
+        return (result.Diagnostics, result.Errors);
+    }
+
+    public async Task<RestoreExecutionResult> RestoreDetailedAsync(
+        DiscoveryResult discovery,
+        Action<string>? progress,
+        CancellationToken cancellationToken,
+        bool forceEvaluate = false,
+        string? packagesDirectory = null)
+    {
+        if (packagesDirectory is not null && !Path.IsPathFullyQualified(packagesDirectory))
+        {
+            throw new ArgumentException("The isolated packages directory must be absolute.", nameof(packagesDirectory));
+        }
+
         var progressGate = new object();
         var targets = discovery.RestoreTargets
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Order(StringComparer.OrdinalIgnoreCase)
             .ToArray();
         var outcomes = new RestoreTargetOutcome?[targets.Length];
-        await Parallel.ForEachAsync(
-            Enumerable.Range(0, targets.Length),
-            new ParallelOptions
-            {
-                CancellationToken = cancellationToken,
-                MaxDegreeOfParallelism = maxDegreeOfParallelism,
-            },
-            async (index, token) =>
-            {
-                outcomes[index] = await RestoreTargetAsync(
-                    targets[index],
-                    progress,
-                    progressGate,
-                    token).ConfigureAwait(false);
-            }).ConfigureAwait(false);
-        return (
+        var indexes = Enumerable.Range(0, targets.Length).ToArray();
+        var solutionIndexes = indexes.Where(index => IsSolution(targets[index])).ToArray();
+        var projectIndexes = indexes.Where(index => !IsSolution(targets[index])).ToArray();
+        await RestoreBatchAsync(solutionIndexes, maximumParallelism: 1).ConfigureAwait(false);
+        await RestoreBatchAsync(projectIndexes, maxDegreeOfParallelism).ConfigureAwait(false);
+        return new RestoreExecutionResult(
             Deduplicate(outcomes.SelectMany(item => item!.Diagnostics)),
-            outcomes.SelectMany(item => item!.Errors).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
+            outcomes.SelectMany(item => item!.Errors).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+            AggregateFailure(outcomes.Select(item => item!.FailureKind)));
+
+        async Task RestoreBatchAsync(IReadOnlyList<int> batch, int maximumParallelism)
+        {
+            await Parallel.ForEachAsync(
+                batch,
+                new ParallelOptions
+                {
+                    CancellationToken = cancellationToken,
+                    MaxDegreeOfParallelism = maximumParallelism,
+                },
+                async (index, token) =>
+                {
+                    outcomes[index] = await RestoreTargetAsync(
+                        targets[index],
+                        progress,
+                        progressGate,
+                        token,
+                        forceEvaluate,
+                        packagesDirectory).ConfigureAwait(false);
+                }).ConfigureAwait(false);
+        }
     }
+
+    private static bool IsSolution(string path) =>
+        Path.GetExtension(path).Equals(".sln", StringComparison.OrdinalIgnoreCase) ||
+        Path.GetExtension(path).Equals(".slnx", StringComparison.OrdinalIgnoreCase);
 
     private async Task<RestoreTargetOutcome> RestoreTargetAsync(
         string target,
         Action<string>? progress,
         object progressGate,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool forceEvaluate,
+        string? packagesDirectory)
     {
         lock (progressGate)
         {
@@ -87,9 +144,29 @@ public sealed partial class RestoreRunner
         ProcessResult result;
         try
         {
+            var arguments = new List<string>
+            {
+                "restore",
+                target,
+                "--nologo",
+                "--verbosity",
+                "minimal",
+            };
+            if (forceEvaluate)
+            {
+                arguments.Add("--force-evaluate");
+            }
+
+            if (packagesDirectory is not null)
+            {
+                Directory.CreateDirectory(packagesDirectory);
+                arguments.Add("--packages");
+                arguments.Add(packagesDirectory);
+            }
+
             result = await processRunner.RunAsync(
                 "dotnet",
-                ["restore", target, "--nologo", "--verbosity", "minimal"],
+                arguments,
                 Path.GetDirectoryName(target)!,
                 timeoutSource.Token).ConfigureAwait(false);
         }
@@ -97,7 +174,8 @@ public sealed partial class RestoreRunner
         {
             return new RestoreTargetOutcome(
                 [],
-                [$"dotnet restore timed out for '{target}' after {timeout.TotalSeconds:0} seconds."]);
+                [$"dotnet restore timed out for '{target}' after {timeout.TotalSeconds:0} seconds."],
+                RestoreProcessFailureKind.TimedOut);
         }
 
         var errors = new List<string>();
@@ -115,12 +193,36 @@ public sealed partial class RestoreRunner
                 $"dotnet restore output exceeded the {ProcessRunner.DefaultMaximumOutputCharacters}-character safety limit for '{target}'.");
         }
 
-        return new RestoreTargetOutcome(ParseNuGetDiagnostics(result.CombinedOutput, target), errors);
+        var failureKind = result.StandardOutputTruncated || result.StandardErrorTruncated
+            ? RestoreProcessFailureKind.OutputLimitExceeded
+            : result.ExitCode == 0
+                ? RestoreProcessFailureKind.None
+                : RestoreProcessFailureKind.Rejected;
+        return new RestoreTargetOutcome(ParseNuGetDiagnostics(result.CombinedOutput, target), errors, failureKind);
     }
 
     private sealed record RestoreTargetOutcome(
         IReadOnlyList<Diagnostic> Diagnostics,
-        IReadOnlyList<string> Errors);
+        IReadOnlyList<string> Errors,
+        RestoreProcessFailureKind FailureKind);
+
+    private static RestoreProcessFailureKind AggregateFailure(IEnumerable<RestoreProcessFailureKind> failures)
+    {
+        var materialized = failures.ToArray();
+        if (materialized.Contains(RestoreProcessFailureKind.TimedOut))
+        {
+            return RestoreProcessFailureKind.TimedOut;
+        }
+
+        if (materialized.Contains(RestoreProcessFailureKind.OutputLimitExceeded))
+        {
+            return RestoreProcessFailureKind.OutputLimitExceeded;
+        }
+
+        return materialized.Contains(RestoreProcessFailureKind.Rejected)
+            ? RestoreProcessFailureKind.Rejected
+            : RestoreProcessFailureKind.None;
+    }
 
     public static IReadOnlyList<Diagnostic> ParseNuGetDiagnostics(string output, string fallbackFile)
     {

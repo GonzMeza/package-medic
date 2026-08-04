@@ -6,6 +6,70 @@ All notable changes to PackageMedic are documented in this file.
 
 No changes yet.
 
+## [0.5.0] - Unreleased
+
+PackageMedic 0.5 turns the existing read-only graph comparison into pull-request intelligence. Its new dependency Impact Gate explains causal paths and blast radius, enforces source and reproducibility policy, adds official NuGet deprecation data, and lets the GitHub Action select a safe PR comparison automatically without modifying or fetching repository state.
+
+### Added
+
+- Dependency Time Machine through `package-medic simulate <package-id> --to <exact-version> [path]`, a restore-validated what-if comparison over two independent snapshots of the same clean `HEAD` commit.
+- Deterministic dependency-simulation schema version 1 with portable repository/request/mutation/verification/comparison boundaries; `pass`, `reject`, `noChange`, and `incomplete` verdicts; separate rejection reasons and operational errors; and explicit restore/build/test/runtime evidence.
+- Exact literal simulation support for CPM `PackageVersion`, project `PackageReference Version`, and `VersionOverride`, including NuGet-equivalent no-change recognition and candidate resolution checks across every selected project/framework/RID context.
+- Explicit `--credential-env <name>` inheritance for private-feed variables inside the otherwise clean simulation subprocess environment, with exact-value output redaction and repeatable variables.
+- PM008 `DeprecatedPackage`, populated by the active SDK's official `dotnet list package --deprecated --format json --output-version 1` output.
+- `--deprecated` for `doctor`, `audit`, and `diff`, with optional direct and transitive coverage through the existing `--include-transitive` switch.
+- Structured `deprecatedPackages` report data including NuGet deprecation reasons, dependency kind, target framework, and recommended replacement package/version range when supplied by the source.
+- Critical-bug deprecations are errors by default; legacy, other, and unknown deprecations are warnings. Direct findings point to the effective project or central version declaration when available.
+- Semantic package diff classification for additions, removals, upgrades, downgrades, non-comparable version changes, and direct/transitive transitions.
+- Diff schema version 2 summaries for package direction and PM007 vulnerability / PM008 deprecation findings introduced or resolved.
+- GitHub Action `mode: auto|scan|diff`; `auto` compares unprivileged `pull_request` events with `github.event.pull_request.base.sha`, rejects misleading privileged `pull_request_target` analysis, and performs a normal scan for other events.
+- GitHub Action controls for deprecation auditing and machine-readable outputs for package, vulnerability, and deprecation deltas.
+- Dependency paths from every changed transitive package to its responsible direct root, including a deterministic canonical path and alternative direct roots when available.
+- A structured `diff.impact` report with direct/transitive additions, upgrades, downgrades, dependency-kind transitions, source changes, signature evidence, causal paths, and maximum dependency blast radius.
+- Repository-configurable Impact Gate policies for downgrade prevention, direct-to-transitive loss of control, total/transitive growth budgets, source changes, same-identity content-hash changes, HTTPS source allowlists, Package Source Mapping, and locked restore.
+- `PMI001`–`PMI010` Impact Gate violation codes with review guidance and an independent diff failure gate.
+- GitHub Action Impact Gate summaries and outputs for pass/fail, violations, added direct/transitive packages, maximum blast radius, package-source changes, and same-identity content changes.
+
+### Changed
+
+- Simulation baseline and candidate restores use separate tracked-file snapshots, NuGet/HTTP/plugin caches, CLI/user homes, application-data roots, and temporary directories; no baseline assets or cached package content is shared with the candidate.
+- `diff` baseline and current restores use separate marker-owned NuGet package, HTTP, plugin, CLI-home, and temporary caches, preventing same-ID/version package content or provenance from leaking across the comparison.
+- Candidate restore failures are classified conservatively: package/version absence, deterministic dependency conflicts, and locked-mode conflicts are valid rejection evidence; authentication, source availability, timeout, output-limit, unknown restore, evaluation, audit, snapshot, and cleanup failures remain incomplete exit code `2`.
+- Dependency declaration mutation is guarded by canonical containment, regular-file/XML structure, expected element/package/metadata/current-version checks, source line, and SHA-256. Only the encoded version-value byte range changes, preserving BOM, encoding, newlines, comments, whitespace, quotes, and attribute order.
+- GitHub Action `diff-base` remains an explicit override. The Action validates that comparison commits already exist locally and gives `fetch-depth: 0` guidance rather than fetching or mutating Git state.
+- Package inventory now retains the effective declaration source file and line internally so source-backed audit diagnostics can produce useful annotations.
+- Package inventory retains bounded NuGet restore provenance, content-hash, and signature-presence evidence when available; unsafe or credential-bearing sources are not treated as trusted metadata.
+- PM007/PM008 diff identity follows package/advisory/project/framework semantics so version changes keep persistent risks persistent instead of falsely reporting them as resolved and reintroduced.
+- Duplicate NU1901–NU1904 restore messages are coalesced when the equivalent structured PM007 advisory is present.
+- PM002 treats exact NuGet-equivalent versions as equal and ignores intentionally disjoint target-framework scopes; target-graph matching prefers exact or compatible frameworks rather than ambiguous string prefixes.
+- Transitive deprecation auditing remains opt-in in the GitHub Action to reduce noisy findings.
+- Large assets graphs are parsed incrementally from streams, discovery results are reused across each analysis, edges are indexed once per target, and dependency paths propagate reachable direct roots through a bounded deterministic work queue.
+- JSON report schema remains version 1 and configuration/baseline schemas remain version 1; the nested Git comparison contract alone advances to schema version 2.
+- Package version ordering is performed locally with deterministic NuGet-compatible stable/prerelease precedence and never consults a registry.
+
+### Safety
+
+- PackageMedic 0.5 does not edit dependency files in the checkout: Time Machine mutates only one owned candidate snapshot, verifies the original worktree remains clean after both snapshots are removed, and never emits hypothetical SARIF or Action annotations.
+- Time Machine requires an unambiguous exact direct/central declaration in a clean committed Git tree. Missing, transitive-only, dynamic, conditional, external, multiple, submodule-unmaterialized, and untracked/generated inputs fail closed before a verdict.
+- Simulation subprocesses resolve `dotnet` and `git` from canonical absolute host `PATH` entries and reject repository- or snapshot-local executable shadowing. Temporary homes and caches are private to the current user on Unix-like hosts.
+- Credential-bearing or query-qualified package-source URLs are not retained as provenance or accepted by source policy, and known URL secret parameters are redacted from operational errors.
+- Candidate mutation integrity is rechecked after restore, and cleanup failures are preserved alongside the original operation failure instead of masking it.
+- Tracked `.gitattributes` and repository-local `.git/info/attributes` `export-ignore` or `export-subst` rules are rejected for Time Machine and the exact commit used by `diff`, because they prevent a Git snapshot from proving byte-for-byte equivalence with committed input; extracted regular files retain Unix executable mode.
+- Build, tests, and runtime compatibility are never claimed by the 0.5 simulator. Restore may execute repository-controlled MSBuild logic and contact configured feeds; filesystem snapshots and cleaned subprocess environments are integrity boundaries, not an operating-system sandbox.
+- Vulnerability and deprecation audits are separate official SDK invocations because NuGet does not allow `--vulnerable` and `--deprecated` in the same command.
+- Unknown or vendor-specific resolved version strings are reported as non-comparable changes instead of being guessed as upgrades or downgrades.
+- Source allowlists accept only credential-free HTTPS URLs or the explicit `local` value; unknown provenance fails closed when an allowlist is configured.
+- Package-cache provenance rejects symbolic-link/junction roots and metadata files, and query/fragment-qualified observed sources remain unknown instead of being collapsed into an allowlisted base URL.
+- Persistent packages that lose previously observed source or content-hash evidence are now explicit source/content changes, so the default Impact Gate fails closed instead of silently treating weaker provenance as unchanged.
+- Streaming assets parsing now bounds individual JSON tokens and high-cardinality package folders, sources, frameworks, libraries, targets, dependency edges, and restore diagnostics before graph materialization.
+- Directory scans with one solution restore that solution before separately restoring projects omitted from it, avoiding concurrent writes when an omitted project is still reached transitively through a project reference.
+- Subprocess executable resolution canonicalizes parent symlinks/junctions and both logical and physical analysis roots, preventing an external-looking `PATH` entry from redirecting execution into repository-controlled files.
+- Git snapshot archives disable external `core.attributesFile` inheritance, so user-global attributes cannot silently alter the commit being compared.
+- Diagnostic gating, SARIF, and annotations resolve PM007/PM008 through the same persistent risk identity used by diff summaries, preventing introduced risks from being dropped during report filtering.
+- Dependency path materialization has explicit node, edge, segment, root-reachability, and traversal-operation limits; dense equal-depth alternatives no longer multiply stored paths.
+- Required Package Source Mapping is evaluated from repository-owned effective sources and usable patterns, while required lockfiles must be bounded, structurally valid NuGet files inside the analysis root.
+- Impact Gate policy is evaluated only from a complete baseline/current comparison. Incomplete analysis remains operational exit code `2` and never publishes a partial safe result.
+
 ## [0.4.0] - 2026-08-03
 
 PackageMedic 0.4 is the first public release after 0.1.0. It consolidates and supersedes the unpublished 0.2 and 0.3 development milestones with their CI, policy, baseline, and safety work rebuilt on the hardened 0.4 dependency and website foundation.
@@ -70,7 +134,7 @@ First stable release of the read-only dependency diagnostics workflow.
 
 ### Added
 
-- `package-medic doctor [path]` for projects, solutions, solution filters, and directories.
+- `package-medic doctor [path]` for projects, classic/XML solution files, and directories.
 - PM001–PM005 diagnostics for stale central versions, version drift, CPM bypasses, duplicate central entries, and NuGet restore problems.
 - Text and deterministic JSON output for local use and CI.
 - Configurable failure thresholds, restore control, and output verbosity.
@@ -86,4 +150,5 @@ First stable release of the read-only dependency diagnostics workflow.
 
 [0.1.0]: https://github.com/GonzMeza/package-medic/releases/tag/v0.1.0
 [0.4.0]: https://github.com/GonzMeza/package-medic/compare/v0.1.0...v0.4.0
-[Unreleased]: https://github.com/GonzMeza/package-medic/compare/v0.4.0...HEAD
+[0.5.0]: https://github.com/GonzMeza/package-medic/compare/v0.4.0...v0.5.0
+[Unreleased]: https://github.com/GonzMeza/package-medic/compare/v0.5.0...HEAD

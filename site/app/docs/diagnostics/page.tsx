@@ -14,8 +14,8 @@ const diagnostics = [
     code: "PM002",
     name: "PackageVersionDrift",
     severity: "warning",
-    meaning: "The same direct package has multiple explicit versions across affected non-CPM projects.",
-    nuance: "VersionOverride is treated as the effective explicit version.",
+    meaning: "The same direct package has non-equivalent explicit versions in overlapping TFM scopes across affected non-CPM projects.",
+    nuance: "Equivalent exact versions such as 1.0 and 1.0.0 and versions in disjoint TFM scopes are ignored. VersionOverride is treated as the effective explicit version.",
     action: "Align explicit versions or migrate the shared package to Central Package Management.",
   },
   {
@@ -58,20 +58,28 @@ const diagnostics = [
     nuance: "Low, moderate, and unknown map to warning; high and critical map to error. Evidence includes version, advisory URL, project, framework, and dependency kind.",
     action: "Review the advisory and validate a compatible non-vulnerable update or replacement.",
   },
+  {
+    code: "PM008",
+    name: "DeprecatedPackage",
+    severity: "warning / error",
+    meaning: "Official NuGet deprecation output reports a resolved package as deprecated.",
+    nuance: "Critical bugs map to error; legacy, other, and unknown reasons map to warning. Replacement package and range are preserved when the source supplies them.",
+    action: "Review the reason and compatibility, then remove or migrate the package deliberately.",
+  },
 ];
 
 export default function DiagnosticsPage() {
   return (
     <DocPage
       eyebrow="Rule reference"
-      title="Seven diagnostics, with evidence."
+      title="Eight diagnostics, with evidence."
       description="PackageMedic rules are conservative, stable, and explain what was observed, where it applies, and what to review next."
     >
       <section id="inspect">
         <h2>Inspect rules from the terminal</h2>
         <CodeBlock>{`package-medic rules
 package-medic explain PM001
-package-medic explain PM007`}</CodeBlock>
+package-medic explain PM008`}</CodeBlock>
         <p>
           Rule severity can be overridden or a rule can be disabled in
           <code>.packagemedic.json</code>. Suppressions require a reason and remain visible in policy
@@ -98,12 +106,13 @@ package-medic explain PM007`}</CodeBlock>
         </div>
       </section>
 
-      <Callout title="PM007 is opt-in">
+      <Callout title="PM007 and PM008 are opt-in">
         <p>
-          A normal <code>doctor</code> run does not contact advisory sources. Use
-          <code>audit</code> or <code>doctor --audit</code>; add <code>--include-transitive</code> for
-          transitive packages. Failure to obtain or parse official audit data is an operational
-          error, never evidence that the graph is safe.
+          A normal <code>doctor</code> run does not request audit metadata. Use
+          <code>audit</code> or <code>doctor --audit</code> for vulnerabilities and
+          <code>doctor --deprecated</code> for deprecations; add <code>--include-transitive</code>
+          for the complete graph. Failure to obtain official data is an operational error, never
+          evidence that the graph is safe.
         </p>
       </Callout>
 

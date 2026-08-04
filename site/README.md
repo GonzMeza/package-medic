@@ -3,7 +3,8 @@
 The animated landing page and complete web documentation for PackageMedic. It
 follows the repository `VERSION` channel and covers installation, commands,
 configuration, baselines, the GitHub Action, reports, diagnostics, security,
-troubleshooting, and the read-only safety model.
+troubleshooting, the Dependency Impact Gate, Dependency Time Machine, and the
+checkout-safety model.
 
 ## Prerequisites
 

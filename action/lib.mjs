@@ -43,7 +43,7 @@ export function parseAnnotationMode(value) {
 export function validateExactVersion(value) {
   const version = String(value ?? '').trim();
   if (!exactNuGetVersion.test(version) || version.includes('*')) {
-    throw new Error('tool-version must be an exact NuGet version, for example 0.4.0.');
+    throw new Error('tool-version must be an exact NuGet version, for example 0.5.0.');
   }
   return version;
 }
@@ -55,6 +55,29 @@ export function validateGitReference(value) {
     throw new Error('diff-base must be a Git reference without whitespace, control characters, or a leading hyphen.');
   }
   return reference;
+}
+
+export function resolveAnalysisMode(value, explicitBase, eventName, pullRequestBaseSha) {
+  const mode = enumValue(value || 'auto', 'mode', ['auto', 'scan', 'diff']);
+  const requestedBase = validateGitReference(explicitBase);
+  if (requestedBase) return { mode: 'diff', diffBase: requestedBase, automatic: false };
+  if (mode === 'scan') return { mode: 'scan', diffBase: undefined, automatic: false };
+  if (mode === 'diff') {
+    throw new Error("mode 'diff' requires diff-base because no implicit comparison reference is assumed.");
+  }
+
+  const event = String(eventName ?? '').trim().toLowerCase();
+  if (event === 'pull_request_target') {
+    throw new Error(
+      "mode 'auto' does not analyze pull_request_target because its default checkout is the trusted base branch; use the unprivileged pull_request event instead.");
+  }
+  if (event === 'pull_request') {
+    const diffBase = validateGitReference(pullRequestBaseSha);
+    if (!diffBase) throw new Error('Pull request auto mode could not resolve github.event.pull_request.base.sha.');
+    return { mode: 'diff', diffBase, automatic: true };
+  }
+
+  return { mode: 'scan', diffBase: undefined, automatic: true };
 }
 
 export function enumValue(value, name, allowed) {
@@ -272,10 +295,40 @@ export function reportDetails(report) {
         resolved: count(report.diff.summary?.resolved),
         severityChanged: count(report.diff.summary?.severityChanged),
         packageChanges: Array.isArray(report.diff.packageChanges) ? report.diff.packageChanges.length : 0,
+        packagesAdded: count(report.diff.packageSummary?.added),
+        packagesRemoved: count(report.diff.packageSummary?.removed),
+        packagesUpgraded: count(report.diff.packageSummary?.upgraded),
+        packagesDowngraded: count(report.diff.packageSummary?.downgraded),
+        uncomparableVersionChanges: count(report.diff.packageSummary?.uncomparableVersionChanges),
+        directToTransitive: count(report.diff.packageSummary?.directToTransitive),
+        transitiveToDirect: count(report.diff.packageSummary?.transitiveToDirect),
+        vulnerabilitiesIntroduced: count(report.diff.riskSummary?.vulnerabilitiesIntroduced),
+        vulnerabilitiesResolved: count(report.diff.riskSummary?.vulnerabilitiesResolved),
+        vulnerabilitiesPersistent: count(report.diff.riskSummary?.vulnerabilitiesPersistent),
+        deprecationsIntroduced: count(report.diff.riskSummary?.deprecationsIntroduced),
+        deprecationsResolved: count(report.diff.riskSummary?.deprecationsResolved),
+        deprecationsPersistent: count(report.diff.riskSummary?.deprecationsPersistent),
         projectSettingsChanges: Array.isArray(report.diff.projectSettingsChanges) ? report.diff.projectSettingsChanges.length : 0,
         complete: report.diff.isComplete !== false,
         baselineAnalysisErrors: Array.isArray(report.diff.baselineAnalysisErrors) ? report.diff.baselineAnalysisErrors.length : 0,
         currentAnalysisErrors: Array.isArray(report.diff.currentAnalysisErrors) ? report.diff.currentAnalysisErrors.length : 0,
+        impact: report.diff.impact && typeof report.diff.impact === 'object'
+          ? {
+              gatePassed: report.diff.impact.gatePassed === true,
+              violations: Array.isArray(report.diff.impact.violations) ? report.diff.impact.violations.length : 0,
+              addedDirect: count(report.diff.impact.summary?.addedDirectPackages),
+              addedTransitive: count(report.diff.impact.summary?.addedTransitivePackages),
+              maximumBlastRadius: count(report.diff.impact.summary?.maximumBlastRadius),
+              sourceChanges: count(report.diff.impact.summary?.sourceChanges),
+              contentChanges: count(report.diff.impact.summary?.contentChanges),
+              violationDetails: Array.isArray(report.diff.impact.violations)
+                ? report.diff.impact.violations.slice(0, 20)
+                : [],
+              omittedViolations: Array.isArray(report.diff.impact.violations)
+                ? Math.max(0, report.diff.impact.violations.length - 20)
+                : 0,
+            }
+          : undefined,
       }
     : undefined;
 
@@ -294,6 +347,35 @@ export function diagnosticsForAnnotations(details, mode) {
 
 function markdownCell(value) {
   return escapeMarkdown(value);
+}
+
+function boundedMarkdown(value, maximum = 600) {
+  return markdownCell(String(value ?? '').slice(0, maximum));
+}
+
+function impactViolationLine(violation) {
+  const code = String(violation?.code || 'Impact-policy')
+    .replaceAll(/[^0-9A-Za-z._-]+/g, '-')
+    .slice(0, 64) || 'Impact-policy';
+  const message = boundedMarkdown(violation?.message || 'Dependency impact policy violation.');
+  const context = [
+    violation?.project && `project ${boundedMarkdown(violation.project, 260)}`,
+    violation?.framework && `framework ${boundedMarkdown(violation.framework, 80)}`,
+    violation?.packageId && `package ${boundedMarkdown(violation.packageId, 160)}`,
+    violation?.rootPackageId && `root ${boundedMarkdown(violation.rootPackageId, 160)}`,
+  ].filter(Boolean);
+  const pathSegments = Array.isArray(violation?.dependencyPath)
+    ? violation.dependencyPath.slice(0, 32).map((segment) => {
+        const id = boundedMarkdown(segment?.packageId, 160);
+        const version = boundedMarkdown(segment?.resolvedVersion, 80);
+        return version ? `${id}@${version}` : id;
+      }).filter(Boolean)
+    : [];
+  const pathText = pathSegments.length > 0 ? ` Path: ${pathSegments.join(' → ')}.` : '';
+  const action = violation?.suggestedAction
+    ? ` Suggested action: ${boundedMarkdown(violation.suggestedAction)}.`
+    : '';
+  return `- \`${code}\` ${message}${context.length > 0 ? ` (${context.join(', ')})` : ''}.${pathText}${action}`;
 }
 
 export function renderSummary(report, details, exitCode, workspace = process.cwd()) {
@@ -331,7 +413,48 @@ export function renderSummary(report, details, exitCode, workspace = process.cwd
       '| Added findings | Resolved findings | Severity changed | Package changes | CPM changes |',
       '| ---: | ---: | ---: | ---: | ---: |',
       `| ${details.diff.added} | ${details.diff.resolved} | ${details.diff.severityChanged} | ${details.diff.packageChanges} | ${details.diff.projectSettingsChanges} |`,
+      '',
+      '| Packages added | Removed | Upgraded | Downgraded | Direct → transitive | Transitive → direct |',
+      '| ---: | ---: | ---: | ---: | ---: | ---: |',
+      `| ${details.diff.packagesAdded} | ${details.diff.packagesRemoved} | ${details.diff.packagesUpgraded} | ${details.diff.packagesDowngraded} | ${details.diff.directToTransitive} | ${details.diff.transitiveToDirect} |`,
+      '',
+      '| Vulnerabilities introduced | Resolved | Deprecations introduced | Resolved |',
+      '| ---: | ---: | ---: | ---: |',
+      `| ${details.diff.vulnerabilitiesIntroduced} | ${details.diff.vulnerabilitiesResolved} | ${details.diff.deprecationsIntroduced} | ${details.diff.deprecationsResolved} |`,
       '');
+
+    if (details.diff.vulnerabilitiesPersistent > 0 || details.diff.deprecationsPersistent > 0) {
+      summary.splice(
+        summary.length - 2,
+        0,
+        '| Vulnerabilities persistent | Deprecations persistent |',
+        '| ---: | ---: |',
+        `| ${details.diff.vulnerabilitiesPersistent} | ${details.diff.deprecationsPersistent} |`,
+        '');
+    }
+
+    if (details.diff.impact) {
+      const impact = details.diff.impact;
+      summary.splice(
+        summary.length - 2,
+        0,
+        `### Impact Gate: ${impact.gatePassed ? 'Passed' : 'Blocked'}`,
+        '',
+        '| Violations | Added direct | Added transitive | Maximum blast radius | Source changes | Content changes |',
+        '| ---: | ---: | ---: | ---: | ---: | ---: |',
+        `| ${impact.violations} | ${impact.addedDirect} | ${impact.addedTransitive} | ${impact.maximumBlastRadius} | ${impact.sourceChanges} | ${impact.contentChanges} |`,
+        '');
+      if (impact.violationDetails.length > 0) {
+        summary.splice(
+          summary.length - 2,
+          0,
+          ...impact.violationDetails.map(impactViolationLine),
+          ...(impact.omittedViolations > 0
+            ? [`- ${impact.omittedViolations} additional violation(s) are available in the JSON report.`]
+            : []),
+          '');
+      }
+    }
   }
 
   return summary.join('\n');

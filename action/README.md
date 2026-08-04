@@ -9,15 +9,16 @@ permissions:
 
 steps:
   - uses: actions/checkout@v6
-  - uses: GonzMeza/package-medic@v0.4.0
+    with:
+      fetch-depth: 0
+  - uses: GonzMeza/package-medic@v0.5.0
     with:
       path: .
-      config: .packagemedic.json
-      baseline: .packagemedic-baseline.json
-      fail-on: none
-      fail-on-new: warning
       audit: 'true'
       include-transitive-audit: 'true'
+      deprecated: 'true'
+      include-transitive-deprecated: 'true'
+      fail-on: warning
       restore: 'true'
       annotations: new
       upload-sarif: 'true'
@@ -33,7 +34,7 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 | Input | Default | Purpose |
 | --- | --- | --- |
 | `path` | `.` | Project, solution, or directory to scan |
-| `tool-version` | `0.4.0` | Exact PackageMedic.Tool version |
+| `tool-version` | `0.5.0` | Exact PackageMedic.Tool version |
 | `dotnet-version` | `8.0.x` | SDK used by the action |
 | `nuget-source` | NuGet.org | Exclusive feed used to install the tool |
 | `restore` | `true` | Restore before the first scan |
@@ -41,9 +42,12 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 | `fail-on-new` | unset | Optional `none`, `warning`, or `error` threshold for new diagnostics |
 | `config` | unset | Repository-relative PackageMedic configuration file |
 | `baseline` | unset | Repository-relative PackageMedic baseline file |
+| `mode` | `auto` | Use unprivileged `pull_request` diff automatically, or force `scan` / `diff` |
 | `audit` | `false` | Ask the active SDK/NuGet tooling for known vulnerabilities and emit PM007 |
 | `include-transitive-audit` | `true` | Include transitive packages when `audit` is enabled |
-| `diff-base` | unset | Reachable Git reference to compare with the checked-out graph |
+| `deprecated` | `false` | Ask the active SDK/NuGet tooling for deprecated packages and emit PM008 |
+| `include-transitive-deprecated` | `false` | Include transitive packages when `deprecated` is enabled |
+| `diff-base` | unset | Reachable Git reference that overrides `mode` |
 | `verbosity` | `normal` | `quiet`, `normal`, or `detailed` |
 | `max-parallelism` | automatic (up to 4) | Maximum concurrent restore, audit, and MSBuild processes (`1`-`32`) |
 | `annotations` | `new` | `new`, `all`, or `none`; legacy `true`/`false` map to `all`/`none` |
@@ -55,7 +59,7 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 
 ## Outputs
 
-`exit-code`, `json-file`, `sarif-file`, `errors`, `warnings`, `information`, `artifact-name`, and `sarif-category` are available to later steps. Exit code `0` means the threshold was not reached, `1` means it was reached, and `2` means an operational or configuration error occurred.
+`exit-code`, report paths, severity counts, artifact identifiers, and diff counts are available to later steps. Diff outputs include packages added/removed/upgraded/downgraded, vulnerabilities and deprecations introduced/resolved/persistent, and the dependency Impact Gate. `impact-gate-passed` is `true` or `false` when a diff contains an impact report and is empty for a normal scan or an older tool. The related numeric outputs are `impact-violations`, `impact-added-direct`, `impact-added-transitive`, `impact-max-blast-radius`, `impact-source-changes`, and `impact-content-changes`. The last two also count loss/gain of source or content-hash evidence for persistent packages; the default policies fail closed on those changes. Exit code `0` means all active gates passed, `1` means a diagnostic or impact policy threshold was reached, and `2` means an operational or configuration error occurred.
 
 Every invocation receives its own report folder, artifact name, and SARIF category. This prevents repeated PackageMedic steps in one job from overwriting each other's reports or uploads. The CLI's `--sarif-output` option creates both public machine-readable formats from one analysis.
 
@@ -63,8 +67,8 @@ With a baseline, the recommended CI policy is `fail-on: none` plus `fail-on-new:
 
 `config` and `baseline` are passed to the same PackageMedic analysis that writes JSON and SARIF. Both must identify existing files inside `GITHUB_WORKSPACE`; paths that escape through `..` or symbolic links are rejected before the tool runs.
 
-`audit` delegates to the official `dotnet list package --vulnerable` command and can contact configured NuGet sources; the action does not implement an advisory client. `include-transitive-audit` has no effect until `audit` is enabled.
+`audit` and `deprecated` delegate to separate official `dotnet list package --vulnerable` and `--deprecated` commands and can contact configured NuGet sources; the action does not implement an advisory client. Their transitive switches have no effect until the corresponding audit is enabled.
 
-With `diff-base`, use `actions/checkout` with enough history (normally `fetch-depth: 0`) so the reference exists locally. Diff mode already selects added or worsened findings, so `baseline` and `fail-on-new` are rejected when `diff-base` is set. Package and CPM changes remain available in JSON and the job summary; SARIF contains current added/worsened diagnostics. The default `restore: 'true'` analyzes both graphs. With `restore: 'false'`, both revisions must contain usable tracked assets files; if either analysis fails, the Action reports an incomplete comparison, publishes no partial changes, and returns operational exit code `2`.
+In `mode: auto`, unprivileged `pull_request` events compare against `github.event.pull_request.base.sha`; push and manual events run a normal scan. `pull_request_target` is rejected because its default checkout is the trusted base branch and would otherwise compare the base against itself. Do not check out and execute an untrusted PR head in that privileged event. Use `actions/checkout` with `fetch-depth: 0` in a normal `pull_request` workflow so the base commit exists locally. PackageMedic validates the commit but never fetches it. `diff-base` explicitly selects another reachable ref and overrides `mode`. Diff mode rejects `baseline` and `fail-on-new`, reports package/CPM/risk changes and causal impact paths in JSON and the job summary, and places only current added/worsened diagnostics in SARIF. The summary shows at most 20 Impact Gate violations; the JSON artifact retains the complete report. With `restore: 'false'`, both revisions must contain usable tracked assets files; otherwise the comparison fails closed with exit code `2`.
 
 Artifact and category base names accept letters, numbers, dots, underscores, and hyphens. Custom `output-directory` values must identify an existing base directory; the action creates only its isolated child directory after verifying that the base stays within the workspace or runner temporary directory.

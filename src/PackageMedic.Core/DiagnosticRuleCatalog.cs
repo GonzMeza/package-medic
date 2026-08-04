@@ -26,7 +26,7 @@ public static class DiagnosticRuleCatalog
             "PM002",
             "PackageVersionDrift",
             "Package versions differ across projects",
-            "A direct package has different explicit versions across projects that are not centrally managed.",
+            "A direct package has non-equivalent explicit versions in overlapping target-framework scopes across projects that are not centrally managed.",
             $"{DiagnosticHelpBaseUri}#pm002--packageversiondrift",
             DiagnosticSeverity.Warning),
         new(
@@ -63,6 +63,13 @@ public static class DiagnosticRuleCatalog
             "Package has a known vulnerability",
             "A resolved direct or transitive NuGet package has a known vulnerability reported by the configured NuGet audit sources.",
             $"{DiagnosticHelpBaseUri}#pm007--vulnerablepackage",
+            DiagnosticSeverity.Warning),
+        new(
+            "PM008",
+            "DeprecatedPackage",
+            "Package is deprecated",
+            "A resolved direct or transitive NuGet package is deprecated by its package source.",
+            $"{DiagnosticHelpBaseUri}#pm008--deprecatedpackage",
             DiagnosticSeverity.Warning),
     ];
 

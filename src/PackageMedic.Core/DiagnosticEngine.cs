@@ -58,7 +58,8 @@ public sealed class DiagnosticEngine
                 item.Line,
                 $"PackageVersion {id} {item.Version}; affected projects: {projectNames}.",
                 "Remove this PackageVersion after reviewing the affected projects and all relevant target-framework conditions.",
-                DiagnosticConfidence.High);
+                DiagnosticConfidence.High,
+                PackageId: id);
         }
     }
 
@@ -73,17 +74,37 @@ public sealed class DiagnosticEngine
 
         foreach (var packageGroup in explicitReferences)
         {
-            var perProject = packageGroup
+            var references = packageGroup.ToArray();
+            var conflictingReferences = new HashSet<DirectPackageReference>();
+            for (var leftIndex = 0; leftIndex < references.Length; leftIndex++)
+            {
+                var left = references[leftIndex];
+                for (var rightIndex = leftIndex + 1; rightIndex < references.Length; rightIndex++)
+                {
+                    var right = references[rightIndex];
+                    if (left.Project.ProjectPath.Equals(right.Project.ProjectPath, StringComparison.OrdinalIgnoreCase) ||
+                        !FrameworkScopesOverlap(left.Project, left.Package, right.Project, right.Package) ||
+                        VersionsAreEquivalent(left.Package.ExplicitVersion!, right.Package.ExplicitVersion!))
+                    {
+                        continue;
+                    }
+
+                    conflictingReferences.Add(left.Package);
+                    conflictingReferences.Add(right.Package);
+                }
+            }
+
+            var perProject = references
+                .Where(item => conflictingReferences.Contains(item.Package))
                 .GroupBy(item => item.Project.ProjectPath, StringComparer.OrdinalIgnoreCase)
                 .Select(group => new
                 {
                     Project = group.First().Project,
-                    Versions = group.Select(item => item.Package.ExplicitVersion!).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.OrdinalIgnoreCase).ToArray(),
+                    Versions = DistinctSemanticVersions(group.Select(item => item.Package.ExplicitVersion!)),
                     Reference = group.First().Package,
                 })
                 .ToArray();
-            var versions = perProject.SelectMany(item => item.Versions).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            if (perProject.Length < 2 || versions.Length < 2)
+            if (perProject.Length < 2)
             {
                 continue;
             }
@@ -98,15 +119,60 @@ public sealed class DiagnosticEngine
                     "PM002",
                     DiagnosticSeverity.Warning,
                     "Package version drift",
-                    $"'{packageGroup.Key}' has different explicit versions across projects that are not centrally managed.",
+                    $"'{packageGroup.Key}' has different explicit versions across compatible target-framework scopes in projects that are not centrally managed.",
                     item.Project.ProjectPath,
                     item.Reference.SourceFile,
                     item.Reference.Line,
                     evidence,
                     "Align the explicit versions or adopt Central Package Management for this package.",
-                    DiagnosticConfidence.High);
+                    DiagnosticConfidence.High,
+                    PackageId: packageGroup.Key);
             }
         }
+    }
+
+    private static bool FrameworkScopesOverlap(
+        ProjectAnalysis leftProject,
+        DirectPackageReference leftPackage,
+        ProjectAnalysis rightProject,
+        DirectPackageReference rightPackage)
+    {
+        var leftScopes = GetFrameworkScopes(leftProject, leftPackage);
+        var rightScopes = GetFrameworkScopes(rightProject, rightPackage);
+        return leftScopes.Count == 0 || rightScopes.Count == 0 ||
+            leftScopes.Any(left => rightScopes.Contains(left, StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static IReadOnlyList<string> GetFrameworkScopes(
+        ProjectAnalysis project,
+        DirectPackageReference package)
+    {
+        var frameworks = string.IsNullOrWhiteSpace(package.TargetFramework)
+            ? project.TargetFrameworks
+            : [package.TargetFramework];
+        return frameworks
+            .Where(framework => !string.IsNullOrWhiteSpace(framework))
+            .Select(framework => framework.Trim().Split('/', 2)[0])
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static bool VersionsAreEquivalent(string left, string right) =>
+        left.Equals(right, StringComparison.OrdinalIgnoreCase) ||
+        AnalysisDiffComparer.TryCompareResolvedVersions(left, right, out var comparison) && comparison == 0;
+
+    private static IReadOnlyList<string> DistinctSemanticVersions(IEnumerable<string> versions)
+    {
+        var distinct = new List<string>();
+        foreach (var version in versions.Order(StringComparer.OrdinalIgnoreCase))
+        {
+            if (!distinct.Any(existing => VersionsAreEquivalent(existing, version)))
+            {
+                distinct.Add(version);
+            }
+        }
+
+        return distinct;
     }
 
     private static IEnumerable<Diagnostic> FindCentralBypasses(IReadOnlyList<ProjectAnalysis> projects)
@@ -127,7 +193,8 @@ public sealed class DiagnosticEngine
                     package.Line,
                     $"PackageReference {package.Id} has an explicit Version. VersionOverride was not used.",
                     "Move the version to Directory.Packages.props, or use VersionOverride when the exception is intentional.",
-                    DiagnosticConfidence.High);
+                    DiagnosticConfidence.High,
+                    PackageId: package.Id);
             }
         }
     }
@@ -172,7 +239,8 @@ public sealed class DiagnosticEngine
                         first.Line,
                         evidence,
                         "Keep one unambiguous PackageVersion for this package in the effective central package scope.",
-                        DiagnosticConfidence.High);
+                        DiagnosticConfidence.High,
+                        PackageId: group.Key);
                 }
             }
         }
@@ -251,7 +319,8 @@ public sealed class DiagnosticEngine
             line,
             $"{itemName} {packageId} has floating {metadataName}='{version}'.",
             "Pin an exact version or an intentionally bounded non-floating range, then review the dependency update policy.",
-            DiagnosticConfidence.High);
+            DiagnosticConfidence.High,
+            PackageId: packageId);
 
     private static string DiagnosticIdentity(Diagnostic item) =>
         $"{item.Code}|{item.OriginalCode}|{item.Project}|{item.File}|{item.Line}|{item.Evidence}";

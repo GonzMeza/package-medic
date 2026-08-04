@@ -15,6 +15,7 @@ public enum CliCommand
     Rules,
     Explain,
     Clean,
+    Simulate,
 }
 
 public enum OutputFormat
@@ -53,7 +54,12 @@ public sealed record CliOptions(
     string? GitReference = null,
     string? RuleCode = null,
     bool ShowHelp = false,
-    int? MaxParallelism = null)
+    int? MaxParallelism = null,
+    bool AuditDeprecatedPackages = false,
+    bool IncludeTransitiveDeprecatedPackages = false,
+    string? SimulationPackageId = null,
+    string? SimulationTargetVersion = null,
+    IReadOnlyList<string>? SimulationCredentialEnvironmentVariables = null)
 {
     public static CliOptions Parse(IReadOnlyList<string> arguments)
     {
@@ -72,12 +78,80 @@ public sealed record CliOptions(
             "doctor" => ParseScan(arguments, 1, CliCommand.Doctor),
             "audit" => ParseScan(arguments, 1, CliCommand.Audit),
             "diff" => ParseDiff(arguments),
+            "simulate" => ParseSimulate(arguments),
             "clean" => ParseScan(arguments, 1, CliCommand.Clean),
             "init" => ParseInit(arguments),
             "baseline" => ParseBaseline(arguments),
             "rules" => ParseRules(arguments),
             "explain" => ParseExplain(arguments),
             _ => throw new UsageException($"Unknown command '{arguments[0]}'."),
+        };
+    }
+
+    private static CliOptions ParseSimulate(IReadOnlyList<string> arguments)
+    {
+        if (arguments.Count < 2 || arguments[1] is "--help" or "-h")
+        {
+            return new CliOptions(CliCommand.Simulate, ShowHelp: true);
+        }
+
+        var packageId = arguments[1].Trim();
+        if (packageId.Length == 0 || packageId.StartsWith("-", StringComparison.Ordinal))
+        {
+            throw new UsageException("Usage: package-medic simulate <package-id> --to <exact-version> [path] [options].");
+        }
+
+        string? targetVersion = null;
+        var credentialEnvironmentVariables = new List<string>();
+        var scanArguments = new List<string> { "simulate" };
+        for (var index = 2; index < arguments.Count; index++)
+        {
+            var argument = arguments[index];
+            if (TryReadOption(arguments, ref index, "--to", out var value))
+            {
+                if (targetVersion is not null)
+                {
+                    throw new UsageException("--to can only be specified once.");
+                }
+
+                targetVersion = NonEmpty(value, "--to");
+            }
+            else if (TryReadOption(arguments, ref index, "--credential-env", out value))
+            {
+                var name = NonEmpty(value, "--credential-env");
+                try
+                {
+                    ProcessEnvironment.ValidateVariableName(name);
+                }
+                catch (ArgumentException exception)
+                {
+                    throw new UsageException(exception.Message);
+                }
+
+                if (credentialEnvironmentVariables.Contains(name, StringComparer.OrdinalIgnoreCase))
+                {
+                    throw new UsageException($"Credential environment variable '{name}' was specified more than once.");
+                }
+
+                credentialEnvironmentVariables.Add(name);
+            }
+            else
+            {
+                scanArguments.Add(argument);
+            }
+        }
+
+        var parsed = ParseScan(scanArguments, 1, CliCommand.Simulate);
+        if (!parsed.ShowHelp && targetVersion is null)
+        {
+            throw new UsageException("'simulate' requires --to <exact-version>.");
+        }
+
+        return parsed with
+        {
+            SimulationPackageId = packageId,
+            SimulationTargetVersion = targetVersion,
+            SimulationCredentialEnvironmentVariables = credentialEnvironmentVariables,
         };
     }
 
@@ -180,7 +254,10 @@ public sealed record CliOptions(
         var force = false;
         var dryRun = false;
         var auditVulnerabilities = command == CliCommand.Audit;
+        var auditDeprecatedPackages = false;
         var includeTransitive = false;
+        var includeTransitiveVulnerabilities = false;
+        var includeTransitiveDeprecatedPackages = false;
         var help = false;
         int? maxParallelism = null;
 
@@ -192,9 +269,19 @@ public sealed record CliOptions(
             else if (argument == "--force") force = true;
             else if (argument == "--dry-run") dryRun = true;
             else if (argument == "--audit") auditVulnerabilities = true;
-            else if (argument == "--include-transitive")
+            else if (argument == "--deprecated") auditDeprecatedPackages = true;
+            else if (argument == "--include-transitive-audit")
             {
                 auditVulnerabilities = true;
+                includeTransitiveVulnerabilities = true;
+            }
+            else if (argument == "--include-transitive-deprecated")
+            {
+                auditDeprecatedPackages = true;
+                includeTransitiveDeprecatedPackages = true;
+            }
+            else if (argument == "--include-transitive")
+            {
                 includeTransitive = true;
             }
             else if (argument is "--help" or "-h") help = true;
@@ -261,9 +348,22 @@ public sealed record CliOptions(
             throw new UsageException("Baseline commands always write the PackageMedic baseline JSON schema and do not accept --format.");
         }
 
-        if (auditVulnerabilities && command is not (CliCommand.Doctor or CliCommand.Audit or CliCommand.Diff))
+        // Preserve the 0.4 shorthand: --include-transitive by itself enables vulnerability auditing.
+        if (includeTransitive && !auditVulnerabilities && !auditDeprecatedPackages)
         {
-            throw new UsageException("--audit and --include-transitive are only supported by 'doctor', 'audit', and 'diff'.");
+            auditVulnerabilities = true;
+        }
+
+        if (includeTransitive)
+        {
+            includeTransitiveVulnerabilities = auditVulnerabilities;
+            includeTransitiveDeprecatedPackages = auditDeprecatedPackages;
+        }
+
+        if ((auditVulnerabilities || auditDeprecatedPackages) &&
+            command is not (CliCommand.Doctor or CliCommand.Audit or CliCommand.Diff or CliCommand.Simulate))
+        {
+            throw new UsageException("Package audit options are only supported by 'doctor', 'audit', and 'diff'.");
         }
 
         if (command == CliCommand.Diff && baseline is not null)
@@ -276,10 +376,33 @@ public sealed record CliOptions(
             throw new UsageException("'diff' already gates only added or worsened findings and does not accept --fail-on-new.");
         }
 
+        if (command == CliCommand.Simulate)
+        {
+            if (noRestore)
+            {
+                throw new UsageException("'simulate' requires isolated baseline and candidate restores and does not accept --no-restore.");
+            }
+
+            if (baseline is not null || failOnNew is not null)
+            {
+                throw new UsageException("'simulate' compares its isolated baseline directly and does not accept --baseline or --fail-on-new.");
+            }
+
+            if (format == OutputFormat.Sarif)
+            {
+                throw new UsageException("'simulate' supports text or JSON output; hypothetical results are not emitted as SARIF.");
+            }
+        }
+
         return new CliOptions(
             command, path, noRestore, format, failOn, failOnNew, verbosity, output, sarifOutput,
             config, noConfig, baseline, restoreTimeout, evaluationTimeout, force, dryRun,
-            auditVulnerabilities, includeTransitive, ShowHelp: help, MaxParallelism: maxParallelism);
+            AuditVulnerabilities: auditVulnerabilities,
+            IncludeTransitive: includeTransitiveVulnerabilities,
+            ShowHelp: help,
+            MaxParallelism: maxParallelism,
+            AuditDeprecatedPackages: auditDeprecatedPackages,
+            IncludeTransitiveDeprecatedPackages: includeTransitiveDeprecatedPackages);
     }
 
     private static bool TryReadOption(IReadOnlyList<string> arguments, ref int index, string name, out string value)

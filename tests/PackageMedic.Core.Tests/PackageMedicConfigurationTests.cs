@@ -32,6 +32,21 @@ public sealed class PackageMedicConfigurationTests
               "timeouts": {
                 "restoreSeconds": 120,
                 "evaluationSeconds": 30
+              },
+              "impact": {
+                "failOnDowngrade": false,
+                "failOnDirectToTransitive": false,
+                "maxAddedPackages": 40,
+                "maxAddedTransitivePackages": 25,
+                "failOnSourceChange": false,
+                "failOnContentChange": false,
+                "requirePackageSourceMapping": true,
+                "requireLockedMode": true,
+                "allowedSources": [
+                  "https://api.nuget.org/v3/index.json/",
+                  "local",
+                  "LOCAL"
+                ]
               }
             }
             """,
@@ -52,6 +67,15 @@ public sealed class PackageMedicConfigurationTests
         Assert.Equal(120, configuration.Timeouts.RestoreSeconds);
         Assert.Equal(30, configuration.Timeouts.EvaluationSeconds);
         Assert.Equal(6, configuration.MaxParallelism);
+        Assert.False(configuration.Impact.FailOnDowngrade);
+        Assert.False(configuration.Impact.FailOnDirectToTransitive);
+        Assert.Equal(40, configuration.Impact.MaxAddedPackages);
+        Assert.Equal(25, configuration.Impact.MaxAddedTransitivePackages);
+        Assert.False(configuration.Impact.FailOnSourceChange);
+        Assert.False(configuration.Impact.FailOnContentChange);
+        Assert.True(configuration.Impact.RequirePackageSourceMapping);
+        Assert.True(configuration.Impact.RequireLockedMode);
+        Assert.Equal(["https://api.nuget.org/v3/index.json", "local"], configuration.Impact.AllowedSources);
     }
 
     [Fact]
@@ -89,6 +113,11 @@ public sealed class PackageMedicConfigurationTests
         Assert.Null(defaults.FailOnNew);
         Assert.Null(defaults.BaselinePath);
         Assert.Equal(PolicyTimeouts.Default, defaults.Timeouts);
+        Assert.True(PackageMedicConfiguration.Default.Impact.FailOnDowngrade);
+        Assert.True(PackageMedicConfiguration.Default.Impact.FailOnDirectToTransitive);
+        Assert.True(PackageMedicConfiguration.Default.Impact.FailOnSourceChange);
+        Assert.True(PackageMedicConfiguration.Default.Impact.FailOnContentChange);
+        Assert.Empty(PackageMedicConfiguration.Default.Impact.AllowedSources);
     }
 
     [Fact]
@@ -121,12 +150,16 @@ public sealed class PackageMedicConfigurationTests
             CreateDiagnostic("PM002", Path.Combine(root, "src", "App.csproj"), "Drift.Package"),
             CreateDiagnostic("PM003", Path.Combine(root, "src", "Generated", "Generated.csproj"), "Generated.Package"),
             CreateDiagnostic("PM003", Path.Combine(root, "src", "Legacy", "Legacy.csproj"), "Example.Legacy"),
+            CreateDiagnostic("PM003", Path.Combine(root, "src", "Legacy", "Other.csproj"), "Other.Package") with
+            {
+                Evidence = "Other.Package depends on Example.Legacy, but the finding belongs to Other.Package.",
+            },
             CreateDiagnostic("PM004", Path.Combine(root, "src", "App.csproj"), "Duplicate.Package"),
         };
 
         var applied = policy.Apply(diagnostics, root);
 
-        Assert.Equal(2, applied.Diagnostics.Count);
+        Assert.Equal(3, applied.Diagnostics.Count);
         Assert.Equal(DiagnosticSeverity.Error, applied.Diagnostics.Single(item => item.Code == "PM002").Severity);
         Assert.Contains(applied.Diagnostics, item => item.Code == "PM004");
         Assert.Equal("PM001", Assert.Single(applied.DisabledDiagnostics).Code);
@@ -147,6 +180,11 @@ public sealed class PackageMedicConfigurationTests
     [InlineData("{\"schemaVersion\":1,\"baseline\":\"../outside.json\"}", "repository-relative")]
     [InlineData("{\"schemaVersion\":1,\"timeouts\":{\"restoreSeconds\":0}}", "between 1 and 3600")]
     [InlineData("{\"schemaVersion\":1,\"maxParallelism\":33}", "between 1 and 32")]
+    [InlineData("{\"schemaVersion\":1,\"impact\":{\"maxAddedPackages\":-1}}", "between 0 and 1000000")]
+    [InlineData("{\"schemaVersion\":1,\"impact\":{\"allowedSources\":[\"http://packages.example\"]}}", "HTTPS source")]
+    [InlineData("{\"schemaVersion\":1,\"impact\":{\"allowedSources\":[\"https://user:secret@packages.example/v3\"]}}", "without credentials")]
+    [InlineData("{\"schemaVersion\":1,\"impact\":{\"allowedSources\":[\"https://packages.example/v3?sig=secret\"]}}", "without credentials")]
+    [InlineData("{\"schemaVersion\":1,\"impact\":{\"allowedSources\":[\"https://packages.example/v3#token\"]}}", "without credentials")]
     public void RejectsInvalidConfiguration(string json, string expectedMessage)
     {
         var exception = Assert.Throws<PackageMedicConfigurationException>(
@@ -231,5 +269,6 @@ public sealed class PackageMedicConfigurationTests
         1,
         $"PackageReference {package}",
         "Review it.",
-        DiagnosticConfidence.High);
+        DiagnosticConfidence.High,
+        PackageId: package);
 }

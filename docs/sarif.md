@@ -1,12 +1,13 @@
 # SARIF output
 
-PackageMedic 0.4 can serialize every PM001–PM007 finding as deterministic SARIF 2.1.0 for code-scanning systems.
+PackageMedic 0.5 can serialize every PM001–PM008 finding as deterministic SARIF 2.1.0 for code-scanning systems.
 
 ```console
 package-medic doctor . --format sarif
 package-medic doctor . --format sarif --output artifacts/packagemedic.sarif
 package-medic doctor . --format json --output artifacts/packagemedic.json --sarif-output artifacts/packagemedic.sarif
 package-medic audit . --include-transitive --format sarif
+package-medic doctor . --deprecated --include-transitive --format sarif
 package-medic diff origin/main . --format json --sarif-output artifacts/packagemedic-diff.sarif
 ```
 
@@ -14,7 +15,9 @@ package-medic diff origin/main . --format json --sarif-output artifacts/packagem
 
 ## Mapping
 
-The SARIF document contains one run whose tool driver is PackageMedic. PM001–PM007 are declared as rules with stable IDs, descriptions, default levels, help text, and links to the diagnostic reference. A complete diff SARIF contains only added findings and findings whose severity increased; resolved findings and package/CPM changes remain in text or JSON because they are not current source findings. If either side of a diff has analysis errors, the command returns `2` and emits no partial diff findings.
+The SARIF document contains one run whose tool driver is PackageMedic. PM001–PM008 are declared as rules with stable IDs, descriptions, default levels, help text, and links to the diagnostic reference. A complete diff SARIF contains only added findings and findings whose severity increased; resolved findings and package/CPM/risk deltas remain in text or JSON because they are not current source findings. If either side of a diff has analysis errors, the command returns `2` and emits no partial diff findings.
+
+Dependency Impact Gate codes `PMI001`–`PMI010`, causal package paths, blast radius, source/content trust, and reproducibility policy remain in text, JSON `diff.impact`, and the GitHub Action summary. They are graph-review decisions rather than source-located PM diagnostics, so they are deliberately not represented as SARIF rules.
 
 | PackageMedic | SARIF level |
 | --- | --- |
@@ -29,6 +32,7 @@ Each result can include:
 - the affected project, evidence, suggested action, and confidence;
 - the original NuGet code for PM005 findings.
 - advisory evidence and dependency context for PM007 findings.
+- deprecation reasons, replacement guidance, and dependency context for PM008 findings.
 - a standard `baselineState` of `new` or `unchanged` when policy/baseline processing is active.
 
 Absolute files outside the detected repository root are deliberately omitted as locations. This prevents machine-specific paths from leaking into portable reports and avoids annotations that cannot resolve in the checked-out source tree.

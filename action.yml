@@ -14,7 +14,7 @@ inputs:
   tool-version:
     description: Exact PackageMedic.Tool NuGet version to install (wildcards are rejected).
     required: false
-    default: 0.4.0
+    default: 0.5.0
   dotnet-version:
     description: .NET SDK version used to install and run PackageMedic.
     required: false
@@ -43,6 +43,10 @@ inputs:
     description: Optional repository-relative PackageMedic baseline file.
     required: false
     default: ''
+  mode:
+    description: Analysis mode (auto selects diff for unprivileged pull_request events and scan otherwise; pull_request_target is rejected).
+    required: false
+    default: auto
   audit:
     description: Audit resolved packages for known vulnerabilities and emit PM007 diagnostics.
     required: false
@@ -51,8 +55,16 @@ inputs:
     description: Include transitive packages when vulnerability auditing is enabled.
     required: false
     default: 'true'
+  deprecated:
+    description: Audit resolved packages for NuGet deprecation metadata and emit PM008 diagnostics.
+    required: false
+    default: 'false'
+  include-transitive-deprecated:
+    description: Include transitive packages when deprecation auditing is enabled.
+    required: false
+    default: 'false'
   diff-base:
-    description: Optional Git reference to compare with the checked-out dependency graph.
+    description: Optional Git reference to compare with the checked-out dependency graph; overrides mode.
     required: false
     default: ''
   verbosity:
@@ -107,6 +119,78 @@ outputs:
   information:
     description: Number of informational diagnostics.
     value: ${{ steps.scan.outputs.information }}
+  findings-added:
+    description: Number of diagnostics introduced by a diff analysis.
+    value: ${{ steps.scan.outputs.findings-added }}
+  findings-resolved:
+    description: Number of diagnostics resolved by a diff analysis.
+    value: ${{ steps.scan.outputs.findings-resolved }}
+  severity-changed:
+    description: Number of persistent diagnostics whose severity changed.
+    value: ${{ steps.scan.outputs.severity-changed }}
+  packages-added:
+    description: Number of packages added by a diff analysis.
+    value: ${{ steps.scan.outputs.packages-added }}
+  packages-removed:
+    description: Number of packages removed by a diff analysis.
+    value: ${{ steps.scan.outputs.packages-removed }}
+  packages-upgraded:
+    description: Number of comparable package upgrades in a diff analysis.
+    value: ${{ steps.scan.outputs.packages-upgraded }}
+  packages-downgraded:
+    description: Number of comparable package downgrades in a diff analysis.
+    value: ${{ steps.scan.outputs.packages-downgraded }}
+  uncomparable-version-changes:
+    description: Number of changed package versions that could not be ordered safely.
+    value: ${{ steps.scan.outputs.uncomparable-version-changes }}
+  direct-to-transitive:
+    description: Number of packages that changed from direct to transitive.
+    value: ${{ steps.scan.outputs.direct-to-transitive }}
+  transitive-to-direct:
+    description: Number of packages that changed from transitive to direct.
+    value: ${{ steps.scan.outputs.transitive-to-direct }}
+  cpm-changes:
+    description: Number of project Central Package Management setting changes.
+    value: ${{ steps.scan.outputs.cpm-changes }}
+  vulnerabilities-introduced:
+    description: Number of PM007 findings introduced by a diff analysis.
+    value: ${{ steps.scan.outputs.vulnerabilities-introduced }}
+  vulnerabilities-resolved:
+    description: Number of PM007 findings resolved by a diff analysis.
+    value: ${{ steps.scan.outputs.vulnerabilities-resolved }}
+  vulnerabilities-persistent:
+    description: Number of PM007 findings that remain present across a diff analysis.
+    value: ${{ steps.scan.outputs.vulnerabilities-persistent }}
+  deprecations-introduced:
+    description: Number of PM008 findings introduced by a diff analysis.
+    value: ${{ steps.scan.outputs.deprecations-introduced }}
+  deprecations-resolved:
+    description: Number of PM008 findings resolved by a diff analysis.
+    value: ${{ steps.scan.outputs.deprecations-resolved }}
+  deprecations-persistent:
+    description: Number of PM008 findings that remain present across a diff analysis.
+    value: ${{ steps.scan.outputs.deprecations-persistent }}
+  impact-gate-passed:
+    description: Whether the dependency Impact Gate passed; empty when no impact comparison was evaluated.
+    value: ${{ steps.scan.outputs.impact-gate-passed }}
+  impact-violations:
+    description: Number of dependency Impact Gate policy violations.
+    value: ${{ steps.scan.outputs.impact-violations }}
+  impact-added-direct:
+    description: Number of direct packages added in the dependency impact comparison.
+    value: ${{ steps.scan.outputs.impact-added-direct }}
+  impact-added-transitive:
+    description: Number of transitive packages added in the dependency impact comparison.
+    value: ${{ steps.scan.outputs.impact-added-transitive }}
+  impact-max-blast-radius:
+    description: Largest number of changed transitive packages attributed to one direct dependency.
+    value: ${{ steps.scan.outputs.impact-max-blast-radius }}
+  impact-source-changes:
+    description: Number of package source changes found by the dependency impact comparison.
+    value: ${{ steps.scan.outputs.impact-source-changes }}
+  impact-content-changes:
+    description: Number of same-version packages whose restored content hash changed.
+    value: ${{ steps.scan.outputs.impact-content-changes }}
   artifact-name:
     description: Isolated artifact name generated for this invocation.
     value: ${{ steps.scan.outputs.artifact-name }}
@@ -136,9 +220,14 @@ runs:
         PACKAGEMEDIC_FAIL_ON_NEW: ${{ inputs.fail-on-new }}
         PACKAGEMEDIC_CONFIG: ${{ inputs.config }}
         PACKAGEMEDIC_BASELINE: ${{ inputs.baseline }}
+        PACKAGEMEDIC_MODE: ${{ inputs.mode }}
         PACKAGEMEDIC_AUDIT: ${{ inputs.audit }}
         PACKAGEMEDIC_INCLUDE_TRANSITIVE_AUDIT: ${{ inputs.include-transitive-audit }}
+        PACKAGEMEDIC_DEPRECATED: ${{ inputs.deprecated }}
+        PACKAGEMEDIC_INCLUDE_TRANSITIVE_DEPRECATED: ${{ inputs.include-transitive-deprecated }}
         PACKAGEMEDIC_DIFF_BASE: ${{ inputs.diff-base }}
+        PACKAGEMEDIC_GITHUB_EVENT_NAME: ${{ github.event_name }}
+        PACKAGEMEDIC_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         PACKAGEMEDIC_VERBOSITY: ${{ inputs.verbosity }}
         PACKAGEMEDIC_MAX_PARALLELISM: ${{ inputs.max-parallelism }}
         PACKAGEMEDIC_ANNOTATIONS: ${{ inputs.annotations }}

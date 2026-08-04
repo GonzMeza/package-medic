@@ -53,6 +53,72 @@ public sealed class DiagnosticEngineTests
     }
 
     [Fact]
+    public void SemanticallyEquivalentExactVersionsDoNotReportDrift()
+    {
+        var first = CreateProject(
+            path: "One.csproj",
+            centrallyManaged: false,
+            direct: [new("Example", "1.0", null, "One.csproj", 6, "net8.0")]);
+        var second = CreateProject(
+            path: "Two.csproj",
+            centrallyManaged: false,
+            direct: [new("Example", "1.0.0+build.42", null, "Two.csproj", 6, "net8.0")]);
+
+        Assert.DoesNotContain(engine.Analyze([first, second]), item => item.Code == "PM002");
+    }
+
+    [Fact]
+    public void VersionDifferencesInDisjointFrameworkScopesDoNotReportDrift()
+    {
+        var first = CreateProject(
+            path: "One.csproj",
+            centrallyManaged: false,
+            frameworks: ["net8.0"],
+            direct: [new("Example", "1.0.0", null, "One.csproj", 6, "net8.0")]);
+        var second = CreateProject(
+            path: "Two.csproj",
+            centrallyManaged: false,
+            frameworks: ["net9.0"],
+            direct: [new("Example", "2.0.0", null, "Two.csproj", 6, "net9.0")]);
+
+        Assert.DoesNotContain(engine.Analyze([first, second]), item => item.Code == "PM002");
+    }
+
+    [Fact]
+    public void BaseAndPlatformSpecificFrameworkScopesDoNotReportDrift()
+    {
+        var first = CreateProject(
+            path: "One.csproj",
+            centrallyManaged: false,
+            frameworks: ["net8.0"],
+            direct: [new("Example", "1.0.0", null, "One.csproj", 6, "net8.0")]);
+        var second = CreateProject(
+            path: "Two.csproj",
+            centrallyManaged: false,
+            frameworks: ["net8.0-windows10.0.19041.0"],
+            direct: [new("Example", "2.0.0", null, "Two.csproj", 6, "net8.0-windows10.0.19041.0")]);
+
+        Assert.DoesNotContain(engine.Analyze([first, second]), item => item.Code == "PM002");
+    }
+
+    [Fact]
+    public void UnscopedReferenceStillReportsDriftForAFrameworkSharedByBothProjects()
+    {
+        var first = CreateProject(
+            path: "One.csproj",
+            centrallyManaged: false,
+            frameworks: ["net8.0", "net9.0"],
+            direct: [new("Example", "1.0.0", null, "One.csproj", 6, null)]);
+        var second = CreateProject(
+            path: "Two.csproj",
+            centrallyManaged: false,
+            frameworks: ["net9.0"],
+            direct: [new("Example", "2.0.0", null, "Two.csproj", 6, "net9.0")]);
+
+        Assert.Equal(2, engine.Analyze([first, second]).Count(item => item.Code == "PM002"));
+    }
+
+    [Fact]
     public void VersionOverrideDoesNotCountAsCentralManagementBypass()
     {
         var project = CreateProject(
@@ -124,12 +190,13 @@ public sealed class DiagnosticEngineTests
         bool pinning = false,
         IReadOnlyList<DirectPackageReference>? direct = null,
         IReadOnlyList<CentralPackageVersion>? central = null,
-        IReadOnlySet<string>? resolved = null) => new()
+        IReadOnlySet<string>? resolved = null,
+        IReadOnlyList<string>? frameworks = null) => new()
         {
             ProjectPath = Path.GetFullPath(path),
             ManagePackageVersionsCentrally = centrallyManaged,
             CentralPackageTransitivePinningEnabled = pinning,
-            TargetFrameworks = ["net8.0"],
+            TargetFrameworks = frameworks ?? ["net8.0"],
             DirectPackages = direct ?? [],
             CentralVersions = central ?? [],
             ResolvedPackages = resolved ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase),

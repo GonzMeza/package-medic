@@ -15,13 +15,13 @@ import {
   parseBoolean,
   renderSummary,
   reportDetails,
+  resolveAnalysisMode,
   resolveNugetSource,
   resolveOutputDirectory,
   resolveOptionalWorkspaceFile,
   resolveScanPath,
   runCommand,
   validateExactVersion,
-  validateGitReference,
   validateReportSize,
 } from './lib.mjs';
 
@@ -48,6 +48,17 @@ function emitFailure(message, outputDirectory, artifactName, sarifCategory) {
   setOutput('errors', 0);
   setOutput('warnings', 0);
   setOutput('information', 0);
+  for (const output of [
+    'findings-added', 'findings-resolved', 'severity-changed',
+    'packages-added', 'packages-removed', 'packages-upgraded', 'packages-downgraded',
+    'uncomparable-version-changes', 'direct-to-transitive', 'transitive-to-direct', 'cpm-changes',
+    'vulnerabilities-introduced', 'vulnerabilities-resolved',
+    'vulnerabilities-persistent',
+    'deprecations-introduced', 'deprecations-resolved', 'deprecations-persistent',
+    'impact-violations', 'impact-added-direct', 'impact-added-transitive',
+    'impact-max-blast-radius', 'impact-source-changes', 'impact-content-changes',
+  ]) setOutput(output, 0);
+  setOutput('impact-gate-passed', '');
   setOutput('artifact-name', artifactName);
   setOutput('sarif-category', sarifCategory);
   setOutput('report-created', false);
@@ -83,10 +94,18 @@ try {
   const source = resolveNugetSource(workspace, runnerTemp, process.env.PACKAGEMEDIC_NUGET_SOURCE || 'https://api.nuget.org/v3/index.json');
   const restore = parseBoolean(process.env.PACKAGEMEDIC_RESTORE, 'restore');
   const audit = parseBoolean(process.env.PACKAGEMEDIC_AUDIT, 'audit');
+  const deprecated = parseBoolean(process.env.PACKAGEMEDIC_DEPRECATED, 'deprecated');
   const includeTransitiveAudit = parseBoolean(
     process.env.PACKAGEMEDIC_INCLUDE_TRANSITIVE_AUDIT,
     'include-transitive-audit');
-  const diffBase = validateGitReference(process.env.PACKAGEMEDIC_DIFF_BASE);
+  const includeTransitiveDeprecated = parseBoolean(
+    process.env.PACKAGEMEDIC_INCLUDE_TRANSITIVE_DEPRECATED,
+    'include-transitive-deprecated');
+  const { diffBase } = resolveAnalysisMode(
+    process.env.PACKAGEMEDIC_MODE,
+    process.env.PACKAGEMEDIC_DIFF_BASE,
+    process.env.PACKAGEMEDIC_GITHUB_EVENT_NAME,
+    process.env.PACKAGEMEDIC_PR_BASE_SHA);
   const annotationMode = parseAnnotationMode(process.env.PACKAGEMEDIC_ANNOTATIONS);
   parseBoolean(process.env.PACKAGEMEDIC_UPLOAD_SARIF, 'upload-sarif');
   parseBoolean(process.env.PACKAGEMEDIC_UPLOAD_ARTIFACT, 'upload-artifact');
@@ -112,6 +131,10 @@ try {
   if (diffBase && !restore) {
     process.stdout.write(
       '::warning title=PackageMedic diff assets::restore=false requires usable assets files tracked in both compared Git trees.\n');
+  }
+  if (diffBase && runCommand('git', ['-C', workspace, 'cat-file', '-e', `${diffBase}^{commit}`]) !== 0) {
+    throw new Error(
+      `Git comparison base '${diffBase}' is not available locally. Configure actions/checkout with fetch-depth: 0 (or provide an available diff-base).`);
   }
 
   mkdirSync(outputDirectory, { recursive: true });
@@ -144,8 +167,10 @@ try {
     : ['doctor', scanPath, '--verbosity', verbosity];
   if (audit) {
     baseArguments.push('--audit');
-    if (includeTransitiveAudit) baseArguments.push('--include-transitive');
   }
+  if (deprecated) baseArguments.push('--deprecated');
+  if (audit && includeTransitiveAudit) baseArguments.push('--include-transitive-audit');
+  if (deprecated && includeTransitiveDeprecated) baseArguments.push('--include-transitive-deprecated');
   if (failOn) baseArguments.push('--fail-on', failOn);
   if (!restore) baseArguments.push('--no-restore');
   if (configFile) baseArguments.push('--config', configFile);
@@ -184,6 +209,30 @@ try {
   setOutput('errors', details.counts.errors);
   setOutput('warnings', details.counts.warnings);
   setOutput('information', details.counts.information);
+  setOutput('findings-added', details.diff?.added ?? 0);
+  setOutput('findings-resolved', details.diff?.resolved ?? 0);
+  setOutput('severity-changed', details.diff?.severityChanged ?? 0);
+  setOutput('packages-added', details.diff?.packagesAdded ?? 0);
+  setOutput('packages-removed', details.diff?.packagesRemoved ?? 0);
+  setOutput('packages-upgraded', details.diff?.packagesUpgraded ?? 0);
+  setOutput('packages-downgraded', details.diff?.packagesDowngraded ?? 0);
+  setOutput('uncomparable-version-changes', details.diff?.uncomparableVersionChanges ?? 0);
+  setOutput('direct-to-transitive', details.diff?.directToTransitive ?? 0);
+  setOutput('transitive-to-direct', details.diff?.transitiveToDirect ?? 0);
+  setOutput('cpm-changes', details.diff?.projectSettingsChanges ?? 0);
+  setOutput('vulnerabilities-introduced', details.diff?.vulnerabilitiesIntroduced ?? 0);
+  setOutput('vulnerabilities-resolved', details.diff?.vulnerabilitiesResolved ?? 0);
+  setOutput('vulnerabilities-persistent', details.diff?.vulnerabilitiesPersistent ?? 0);
+  setOutput('deprecations-introduced', details.diff?.deprecationsIntroduced ?? 0);
+  setOutput('deprecations-resolved', details.diff?.deprecationsResolved ?? 0);
+  setOutput('deprecations-persistent', details.diff?.deprecationsPersistent ?? 0);
+  setOutput('impact-gate-passed', details.diff?.impact ? details.diff.impact.gatePassed : '');
+  setOutput('impact-violations', details.diff?.impact?.violations ?? 0);
+  setOutput('impact-added-direct', details.diff?.impact?.addedDirect ?? 0);
+  setOutput('impact-added-transitive', details.diff?.impact?.addedTransitive ?? 0);
+  setOutput('impact-max-blast-radius', details.diff?.impact?.maximumBlastRadius ?? 0);
+  setOutput('impact-source-changes', details.diff?.impact?.sourceChanges ?? 0);
+  setOutput('impact-content-changes', details.diff?.impact?.contentChanges ?? 0);
   setOutput('artifact-name', artifactName);
   setOutput('sarif-category', sarifCategory);
   setOutput('report-created', existsSync(jsonFile) || existsSync(sarifFile));

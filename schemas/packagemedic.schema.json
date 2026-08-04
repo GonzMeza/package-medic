@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/GonzMeza/package-medic/main/schemas/packagemedic.schema.json",
   "title": "PackageMedic configuration",
-  "description": "Configuration for PackageMedic 0.3 and later.",
+  "description": "Configuration for PackageMedic 0.5 and later. Schema version 1 remains backward compatible.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion"],
@@ -44,7 +44,8 @@
         "PM004": { "$ref": "#/$defs/rule" },
         "PM005": { "$ref": "#/$defs/rule" },
         "PM006": { "$ref": "#/$defs/rule" },
-        "PM007": { "$ref": "#/$defs/rule" }
+        "PM007": { "$ref": "#/$defs/rule" },
+        "PM008": { "$ref": "#/$defs/rule" }
       }
     },
     "suppressions": {
@@ -57,7 +58,10 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 32,
-      "description": "Maximum concurrent restore, vulnerability-audit, and MSBuild processes."
+      "description": "Maximum concurrent restore, package-audit, and MSBuild processes."
+    },
+    "impact": {
+      "$ref": "#/$defs/impactPolicy"
     },
     "timeouts": {
       "$ref": "#/$defs/timeouts"
@@ -74,7 +78,7 @@
     },
     "ruleCode": {
       "type": "string",
-      "enum": ["PM001", "PM002", "PM003", "PM004", "PM005", "PM006", "PM007"]
+      "enum": ["PM001", "PM002", "PM003", "PM004", "PM005", "PM006", "PM007", "PM008"]
     },
     "rule": {
       "type": "object",
@@ -128,6 +132,60 @@
           "minimum": 1,
           "maximum": 3600,
           "default": 60
+        }
+      }
+    },
+    "impactPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Pull-request dependency impact gates used by the diff command and GitHub Action.",
+      "properties": {
+        "failOnDowngrade": {
+          "type": "boolean",
+          "default": true
+        },
+        "failOnDirectToTransitive": {
+          "type": "boolean",
+          "default": true
+        },
+        "maxAddedPackages": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "maxAddedTransitivePackages": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "failOnSourceChange": {
+          "type": "boolean",
+          "default": true
+        },
+        "failOnContentChange": {
+          "type": "boolean",
+          "default": true
+        },
+        "requirePackageSourceMapping": {
+          "type": "boolean",
+          "description": "Require effective repository-owned Package Source Mapping for every resolved package when multiple sources are active.",
+          "default": false
+        },
+        "requireLockedMode": {
+          "type": "boolean",
+          "description": "Require locked restore and a structurally valid NuGet lock file inside the analysis root.",
+          "default": false
+        },
+        "allowedSources": {
+          "type": "array",
+          "maxItems": 100,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "An HTTPS package source without credentials, or the literal local."
+          }
         }
       }
     }

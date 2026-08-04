@@ -141,7 +141,7 @@ public sealed class AnalysisDiffTests
         Assert.Equal(5, report.PackageChanges.Count);
         Assert.Contains(report.PackageChanges, item => item.Kind == PackageChangeKind.Added && item.After!.Id == "Added");
         Assert.Contains(report.PackageChanges, item => item.Kind == PackageChangeKind.Removed && item.Before!.Id == "Removed");
-        Assert.Contains(report.PackageChanges, item => item.Kind == PackageChangeKind.VersionChanged && item.After!.Id == "A");
+        Assert.Contains(report.PackageChanges, item => item.Kind == PackageChangeKind.Upgraded && item.After!.Id == "A");
         var kindChange = Assert.Single(report.PackageChanges, item => item.After?.Id == "Kind");
         Assert.Equal(PackageChangeKind.Modified, kindChange.Kind);
         Assert.Contains(PackageAttributeChangeKind.DependencyKind, kindChange.ChangedAttributes);
@@ -155,6 +155,9 @@ public sealed class AnalysisDiffTests
         Assert.True(settings.After!.ManagePackageVersionsCentrally);
         Assert.Contains(report.ProjectSettingsChanges, item => item.Kind == ProjectSettingsChangeKind.Added);
         Assert.Contains(report.ProjectSettingsChanges, item => item.Kind == ProjectSettingsChangeKind.Removed);
+        Assert.Equal(1, report.PackageSummary.Added);
+        Assert.Equal(1, report.PackageSummary.Removed);
+        Assert.Equal(1, report.PackageSummary.Upgraded);
         var json = AnalysisDiffSerializer.SerializeJson(report);
         Assert.DoesNotContain(beforeRoot, json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain(afterRoot, json, StringComparison.OrdinalIgnoreCase);
@@ -187,13 +190,204 @@ public sealed class AnalysisDiffTests
 
         Assert.Equal(2, report.PackageChanges.Count);
         var compound = Assert.Single(report.PackageChanges, item => item.After!.RuntimeIdentifier == "win-x64");
-        Assert.Equal(PackageChangeKind.Modified, compound.Kind);
+        Assert.Equal(PackageChangeKind.Upgraded, compound.Kind);
         Assert.Contains(PackageAttributeChangeKind.ResolvedVersion, compound.ChangedAttributes);
         Assert.Contains(PackageAttributeChangeKind.DependencyKind, compound.ChangedAttributes);
         var text = AnalysisDiffSerializer.SerializeText(report);
         Assert.Contains("net8.0/win-x64", text, StringComparison.Ordinal);
         Assert.Contains("resolved 1.0.0 -> 1.1.0", text, StringComparison.Ordinal);
         Assert.Contains("kind transitive -> direct", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("1.0.0", "1.1.0", -1)]
+    [InlineData("2.0.0", "1.9.9", 1)]
+    [InlineData("1.0.0-preview.2", "1.0.0-preview.10", -1)]
+    [InlineData("1.0.0-preview.999999999999999999999", "1.0.0-preview.1000000000000000000000", -1)]
+    [InlineData("1.0.0-preview", "1.0.0", -1)]
+    [InlineData("1.0", "1.0.0+build.2", 0)]
+    public void ComparesResolvedVersionsWithoutNetworkMetadata(string before, string after, int expectedSign)
+    {
+        Assert.True(AnalysisDiffComparer.TryCompareResolvedVersions(before, after, out var comparison));
+        Assert.Equal(expectedSign, Math.Sign(comparison));
+    }
+
+    [Fact]
+    public void ClassifiesDowngradesAndUncomparableVersionsAndSummarizesDependencyRisk()
+    {
+        var beforeRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.Before"));
+        var afterRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.After"));
+        var baseline = Result(
+            "before",
+            Diagnostic("PM007", DiagnosticSeverity.Error, beforeRoot, "resolved vulnerability")) with
+        {
+            Packages =
+            [
+                Package(beforeRoot, "Down", "2.0.0", PackageDependencyKind.Direct),
+                Package(beforeRoot, "Opaque", "vendor-a", PackageDependencyKind.Direct),
+            ],
+        };
+        var current = Result(
+            "after",
+            Diagnostic("PM008", DiagnosticSeverity.Warning, afterRoot, "new deprecation")) with
+        {
+            Packages =
+            [
+                Package(afterRoot, "Down", "1.5.0", PackageDependencyKind.Direct),
+                Package(afterRoot, "Opaque", "vendor-b", PackageDependencyKind.Direct),
+            ],
+        };
+
+        var report = AnalysisDiffComparer.Compare(
+            baseline, beforeRoot, current, afterRoot, "main", Commit);
+
+        Assert.Contains(report.PackageChanges, item => item.Kind == PackageChangeKind.Downgraded);
+        Assert.Contains(report.PackageChanges, item => item.Kind == PackageChangeKind.VersionChanged);
+        Assert.Equal(1, report.PackageSummary.Downgraded);
+        Assert.Equal(1, report.PackageSummary.UncomparableVersionChanges);
+        Assert.Equal(1, report.RiskSummary.VulnerabilitiesResolved);
+        Assert.Equal(1, report.RiskSummary.DeprecationsIntroduced);
+    }
+
+    [Fact]
+    public void TreatsTheSameAdvisoryAsPersistentAcrossPackageVersionChanges()
+    {
+        var beforeRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.Before"));
+        var afterRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.After"));
+        var baseline = VulnerabilityResult(
+            beforeRoot,
+            "1.0.0",
+            VulnerabilitySeverity.High,
+            "https://github.com/advisories/GHSA-persistent");
+        var current = VulnerabilityResult(
+            afterRoot,
+            "1.1.0",
+            VulnerabilitySeverity.High,
+            "https://github.com/advisories/GHSA-persistent");
+
+        var report = AnalysisDiffComparer.Compare(
+            baseline, beforeRoot, current, afterRoot, "main", Commit);
+
+        Assert.Empty(report.Changes);
+        Assert.Equal(0, report.RiskSummary.VulnerabilitiesIntroduced);
+        Assert.Equal(0, report.RiskSummary.VulnerabilitiesResolved);
+        Assert.Equal(1, report.RiskSummary.VulnerabilitiesPersistent);
+        Assert.Equal(1, report.PackageSummary.Upgraded);
+        Assert.Contains("Vulnerabilities +0 -0 =1", AnalysisDiffSerializer.SerializeText(report), StringComparison.Ordinal);
+        using var document = JsonDocument.Parse(AnalysisDiffSerializer.SerializeJson(report));
+        Assert.Equal(
+            1,
+            document.RootElement.GetProperty("riskSummary").GetProperty("vulnerabilitiesPersistent").GetInt32());
+    }
+
+    [Fact]
+    public void SelectsRiskDiagnosticsUsingTheSamePersistentIdentityAsDiff()
+    {
+        var root = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.RiskGate"));
+        var current = VulnerabilityResult(
+            root,
+            "2.0.0",
+            VulnerabilitySeverity.High,
+            "https://github.com/advisories/GHSA-test-0000-0000");
+        var comparison = AnalysisDiffComparer.Compare(Result(root), root, current, root, "main", Commit);
+        var added = Assert.Single(comparison.Changes, change => change.After?.Code == "PM007");
+
+        var selected = AnalysisDiffComparer.SelectDiagnosticsByFingerprint(
+            current,
+            root,
+            new HashSet<string>([added.Fingerprint], StringComparer.Ordinal));
+
+        Assert.Equal("PM007", Assert.Single(selected).Code);
+        Assert.NotEqual(
+            added.Fingerprint,
+            DiagnosticFingerprint.Compute(Assert.Single(current.Diagnostics), root));
+    }
+
+    [Fact]
+    public void SelectsDeprecationsUsingTheSamePersistentIdentityAsDiff()
+    {
+        var root = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.DeprecationGate"));
+        var current = DeprecationResult(root, "2.0.0", "Replacement.Package");
+        var comparison = AnalysisDiffComparer.Compare(Result(root), root, current, root, "main", Commit);
+        var added = Assert.Single(comparison.Changes, change => change.After?.Code == "PM008");
+
+        var selected = AnalysisDiffComparer.SelectDiagnosticsByFingerprint(
+            current,
+            root,
+            new HashSet<string>([added.Fingerprint], StringComparer.Ordinal));
+
+        Assert.Equal("PM008", Assert.Single(selected).Code);
+        Assert.NotEqual(
+            added.Fingerprint,
+            DiagnosticFingerprint.Compute(Assert.Single(current.Diagnostics), root));
+    }
+
+    [Fact]
+    public void ReportsSeverityChangeWithoutReintroducingTheSameAdvisory()
+    {
+        var beforeRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.Before"));
+        var afterRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.After"));
+        var baseline = VulnerabilityResult(
+            beforeRoot,
+            "1.0.0",
+            VulnerabilitySeverity.Moderate,
+            "https://github.com/advisories/GHSA-severity");
+        var current = VulnerabilityResult(
+            afterRoot,
+            "1.0.1",
+            VulnerabilitySeverity.High,
+            "https://github.com/advisories/GHSA-severity");
+
+        var report = AnalysisDiffComparer.Compare(
+            baseline, beforeRoot, current, afterRoot, "main", Commit);
+
+        var changed = Assert.Single(report.Changes);
+        Assert.Equal(DiagnosticChangeKind.SeverityChanged, changed.Kind);
+        Assert.Equal(0, report.RiskSummary.VulnerabilitiesIntroduced);
+        Assert.Equal(0, report.RiskSummary.VulnerabilitiesResolved);
+        Assert.Equal(1, report.RiskSummary.VulnerabilitiesPersistent);
+    }
+
+    [Fact]
+    public void CountsChangedAdvisoryAsOneResolvedAndOneIntroducedRisk()
+    {
+        var beforeRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.Before"));
+        var afterRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.After"));
+        var baseline = VulnerabilityResult(
+            beforeRoot,
+            "1.0.0",
+            VulnerabilitySeverity.High,
+            "https://github.com/advisories/GHSA-old");
+        var current = VulnerabilityResult(
+            afterRoot,
+            "1.1.0",
+            VulnerabilitySeverity.High,
+            "https://github.com/advisories/GHSA-new");
+
+        var report = AnalysisDiffComparer.Compare(
+            baseline, beforeRoot, current, afterRoot, "main", Commit);
+
+        Assert.Equal(2, report.Changes.Count);
+        Assert.Equal(1, report.RiskSummary.VulnerabilitiesIntroduced);
+        Assert.Equal(1, report.RiskSummary.VulnerabilitiesResolved);
+        Assert.Equal(0, report.RiskSummary.VulnerabilitiesPersistent);
+    }
+
+    [Fact]
+    public void TreatsDeprecationAsPersistentAcrossVersionAndRecommendationChanges()
+    {
+        var beforeRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.Before"));
+        var afterRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "PackageMedic.Diff.After"));
+        var baseline = DeprecationResult(beforeRoot, "1.0.0", "Replacement.One");
+        var current = DeprecationResult(afterRoot, "2.0.0", "Replacement.Two");
+
+        var report = AnalysisDiffComparer.Compare(
+            baseline, beforeRoot, current, afterRoot, "main", Commit);
+
+        Assert.Empty(report.Changes);
+        Assert.Equal(0, report.RiskSummary.DeprecationsIntroduced);
+        Assert.Equal(0, report.RiskSummary.DeprecationsResolved);
+        Assert.Equal(1, report.RiskSummary.DeprecationsPersistent);
     }
 
     [Fact]
@@ -231,6 +425,51 @@ public sealed class AnalysisDiffTests
         new ScanSummary(0, 0, 0, 0, 0, diagnostics.Count(item => item.Severity == DiagnosticSeverity.Warning), 0),
         diagnostics,
         []);
+
+    private static AnalysisResult VulnerabilityResult(
+        string root,
+        string version,
+        VulnerabilitySeverity severity,
+        string advisory)
+    {
+        var project = Path.Combine(root, "src", "App.csproj");
+        var vulnerability = new PackageVulnerability(
+            "Risk.Package",
+            version,
+            severity,
+            advisory,
+            project,
+            "net8.0",
+            PackageDependencyKind.Direct);
+        var package = Package(root, vulnerability.PackageId, version, PackageDependencyKind.Direct);
+        var diagnostic = Assert.Single(VulnerabilityAuditParser.ToDiagnostics([vulnerability], [package]));
+        return Result(root, diagnostic) with
+        {
+            Packages = [package],
+            Vulnerabilities = [vulnerability],
+        };
+    }
+
+    private static AnalysisResult DeprecationResult(string root, string version, string replacement)
+    {
+        var project = Path.Combine(root, "src", "App.csproj");
+        var deprecation = new DeprecatedPackage(
+            "Deprecated.Package",
+            version,
+            [PackageDeprecationReason.Legacy],
+            replacement,
+            "[1.0.0,)",
+            project,
+            "net8.0",
+            PackageDependencyKind.Direct);
+        var package = Package(root, deprecation.PackageId, version, PackageDependencyKind.Direct);
+        var diagnostic = Assert.Single(DeprecationAuditParser.ToDiagnostics([deprecation], [package]));
+        return Result(root, diagnostic) with
+        {
+            Packages = [package],
+            DeprecatedPackages = [deprecation],
+        };
+    }
 
     private static Diagnostic Diagnostic(
         string code,

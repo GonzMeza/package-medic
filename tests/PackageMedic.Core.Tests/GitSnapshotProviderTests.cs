@@ -39,6 +39,10 @@ public sealed class GitSnapshotProviderTests
                 runner.Invocations,
                 invocation => invocation.Arguments.SequenceEqual(
                     ["rev-parse", "--verify", "--end-of-options", "main~1^{commit}"]));
+            Assert.Contains(
+                runner.Invocations,
+                invocation => invocation.Arguments.Take(3).SequenceEqual(
+                    ["-c", "core.attributesFile=", "archive"]));
 
             snapshot.Dispose();
             snapshot.Dispose();
@@ -117,6 +121,140 @@ public sealed class GitSnapshotProviderTests
 
             Assert.False(File.GetAttributes(linkPath).HasFlag(FileAttributes.ReparsePoint));
             Assert.Equal("../../outside", File.ReadAllText(linkPath));
+        }
+        finally
+        {
+            Directory.Delete(repository, recursive: true);
+            Directory.Delete(temporaryRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CleanupDoesNotFollowAHostileDirectorySymbolicLink()
+    {
+        var repository = CreateTemporaryDirectory("repository");
+        var temporaryRoot = CreateTemporaryDirectory("snapshots");
+        var external = CreateTemporaryDirectory("external");
+        var sentinel = Path.Combine(external, "must-survive.txt");
+        File.WriteAllText(sentinel, "outside");
+        try
+        {
+            var provider = new GitSnapshotProvider(
+                new ArchiveProcessRunner(repository, Commit),
+                TimeSpan.FromSeconds(5),
+                temporaryRoot);
+            var snapshot = await provider.MaterializeAsync(
+                repository,
+                "HEAD",
+                TestContext.Current.CancellationToken);
+            var ownedDirectory = Directory.GetParent(snapshot.SnapshotDirectory)!.FullName;
+            var link = Path.Combine(snapshot.SnapshotDirectory, "hostile-link");
+
+            try
+            {
+                Directory.CreateSymbolicLink(link, external);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                snapshot.Dispose();
+                Assert.True(File.Exists(sentinel));
+                return;
+            }
+
+            snapshot.Dispose();
+
+            Assert.False(Directory.Exists(ownedDirectory));
+            Assert.True(File.Exists(sentinel));
+            Assert.Equal("outside", File.ReadAllText(sentinel));
+        }
+        finally
+        {
+            Directory.Delete(repository, recursive: true);
+            Directory.Delete(temporaryRoot, recursive: true);
+            Directory.Delete(external, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task CleanupRemovesReadOnlyFilesAndOwnershipMarker()
+    {
+        var repository = CreateTemporaryDirectory("repository");
+        var temporaryRoot = CreateTemporaryDirectory("snapshots");
+        try
+        {
+            var provider = new GitSnapshotProvider(
+                new ArchiveProcessRunner(repository, Commit),
+                TimeSpan.FromSeconds(5),
+                temporaryRoot);
+            var snapshot = await provider.MaterializeAsync(
+                repository,
+                "HEAD",
+                TestContext.Current.CancellationToken);
+            var ownedDirectory = Directory.GetParent(snapshot.SnapshotDirectory)!.FullName;
+            var nestedDirectory = Path.Combine(snapshot.SnapshotDirectory, "readonly");
+            var nestedFile = Path.Combine(nestedDirectory, "content.txt");
+            var marker = Path.Combine(ownedDirectory, GitSnapshotProvider.OwnershipMarkerFileName);
+            Directory.CreateDirectory(nestedDirectory);
+            File.WriteAllText(nestedFile, "content");
+            File.SetAttributes(nestedFile, File.GetAttributes(nestedFile) | FileAttributes.ReadOnly);
+            File.SetAttributes(marker, File.GetAttributes(marker) | FileAttributes.ReadOnly);
+
+            snapshot.Dispose();
+
+            Assert.False(Directory.Exists(ownedDirectory));
+        }
+        finally
+        {
+            Directory.Delete(repository, recursive: true);
+            Directory.Delete(temporaryRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RefusesPrefixOnlyDirectoryWithoutOwnershipMarker()
+    {
+        var root = CreateTemporaryDirectory("ownership");
+        var candidate = Path.Combine(root, $"PackageMedic.GitSnapshot.{Guid.NewGuid():N}");
+        var sentinel = Path.Combine(candidate, "must-survive.txt");
+        Directory.CreateDirectory(candidate);
+        File.WriteAllText(sentinel, "not-owned");
+        try
+        {
+            var exception = Assert.Throws<InvalidOperationException>(() =>
+                GitSnapshotProvider.DeleteOwnedDirectory(candidate, Guid.NewGuid().ToString("N")));
+
+            Assert.Contains("ownership marker", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.True(File.Exists(sentinel));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RefusesAnIncorrectOwnershipTokenWithoutDeletingTheSnapshot()
+    {
+        var repository = CreateTemporaryDirectory("repository");
+        var temporaryRoot = CreateTemporaryDirectory("snapshots");
+        try
+        {
+            var provider = new GitSnapshotProvider(
+                new ArchiveProcessRunner(repository, Commit),
+                TimeSpan.FromSeconds(5),
+                temporaryRoot);
+            using var snapshot = await provider.MaterializeAsync(
+                repository,
+                "HEAD",
+                TestContext.Current.CancellationToken);
+            var ownedDirectory = Directory.GetParent(snapshot.SnapshotDirectory)!.FullName;
+
+            var exception = Assert.Throws<InvalidOperationException>(() =>
+                GitSnapshotProvider.DeleteOwnedDirectory(ownedDirectory, Guid.NewGuid().ToString("N")));
+
+            Assert.Contains("invalid ownership marker", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.True(Directory.Exists(ownedDirectory));
+            Assert.True(File.Exists(Path.Combine(snapshot.SnapshotDirectory, "src", "App.csproj")));
         }
         finally
         {
@@ -244,6 +382,43 @@ public sealed class GitSnapshotProviderTests
         }
     }
 
+    [Fact]
+    public async Task PreservesTrackedExecutableModeOnUnix()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateTemporaryDirectory("tar-mode");
+        var archive = Path.Combine(root, "snapshot.tar");
+        var destination = Path.Combine(root, "output");
+        Directory.CreateDirectory(destination);
+        try
+        {
+            using (var stream = File.Create(archive))
+            using (var writer = new TarWriter(stream, leaveOpen: false))
+            {
+                writer.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "build.sh")
+                {
+                    DataStream = new MemoryStream(Encoding.UTF8.GetBytes("#!/bin/sh\n")),
+                    Mode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute,
+                });
+            }
+
+            await GitSnapshotProvider.ExtractTrackedFilesAsync(
+                archive,
+                destination,
+                TestContext.Current.CancellationToken);
+
+            Assert.True(File.GetUnixFileMode(Path.Combine(destination, "build.sh")).HasFlag(UnixFileMode.UserExecute));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static void WriteArchive(string path, params (string Name, string Content)[] entries)
     {
         using var stream = File.Create(path);
@@ -289,7 +464,7 @@ public sealed class GitSnapshotProviderTests
                 return Task.FromResult(new ProcessResult(0, commit + Environment.NewLine, string.Empty));
             }
 
-            if (arguments.Count > 0 && arguments[0] == "archive")
+            if (arguments.Contains("archive", StringComparer.Ordinal))
             {
                 var output = arguments.Single(argument => argument.StartsWith("--output=", StringComparison.Ordinal))[9..];
                 Directory.CreateDirectory(Path.GetDirectoryName(output)!);

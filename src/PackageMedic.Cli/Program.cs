@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using PackageMedic.Core;
 
 namespace PackageMedic.Cli;
@@ -6,7 +7,24 @@ public static class Program
 {
     private static readonly byte[] NewLineUtf8 = [(byte)'\n'];
 
-    public static Task<int> Main(string[] args) => ExecuteAsync(args, Console.Out, Console.Error, CancellationToken.None);
+    public static async Task<int> Main(string[] args)
+    {
+        using var cancellation = new CancellationTokenSource();
+        ConsoleCancelEventHandler cancelHandler = (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            cancellation.Cancel();
+        };
+        Console.CancelKeyPress += cancelHandler;
+        try
+        {
+            return await ExecuteAsync(args, Console.Out, Console.Error, cancellation.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            Console.CancelKeyPress -= cancelHandler;
+        }
+    }
 
     public static async Task<int> ExecuteAsync(
         string[] args,
@@ -21,7 +39,7 @@ public static class Program
         }
         catch (UsageException exception)
         {
-            await error.WriteLineAsync($"error: {exception.Message}").ConfigureAwait(false);
+            await error.WriteLineAsync($"error: {ProcessRunner.RedactSecrets(exception.Message)}").ConfigureAwait(false);
             await error.WriteLineAsync("Run 'package-medic --help' for usage.").ConfigureAwait(false);
             return 2;
         }
@@ -43,6 +61,7 @@ public static class Program
                 CliCommand.BaselineCreate or CliCommand.BaselineUpdate =>
                     await WriteBaselineAsync(options, output, error, cancellationToken).ConfigureAwait(false),
                 CliCommand.Clean => await WriteCleanPlanAsync(options, output, error, cancellationToken).ConfigureAwait(false),
+                CliCommand.Simulate => await RunSimulationV2Async(options, output, error, cancellationToken).ConfigureAwait(false),
                 CliCommand.Doctor or CliCommand.Audit =>
                     await RunDoctorAsync(options, output, error, cancellationToken).ConfigureAwait(false),
                 CliCommand.Diff => await RunDiffAsync(options, output, error, cancellationToken).ConfigureAwait(false),
@@ -61,10 +80,11 @@ public static class Program
             InvalidOperationException or
             UnauthorizedAccessException or
             IOException or
+            AggregateException or
             UsageException or
             PackageMedicConfigurationException)
         {
-            await error.WriteLineAsync($"error: {exception.Message}").ConfigureAwait(false);
+            await error.WriteLineAsync($"error: {ProcessRunner.RedactSecrets(exception.Message)}").ConfigureAwait(false);
             return 2;
         }
     }
@@ -120,6 +140,12 @@ public static class Program
         using var snapshot = await new GitSnapshotProvider(processRunner)
             .MaterializeAsync(currentRepositoryRoot, options.GitReference!, cancellationToken)
             .ConfigureAwait(false);
+        await new GitWorkingTreeInspector(processRunner)
+            .EnsureArchiveSemanticsAreReproducibleAsync(
+                currentRepositoryRoot,
+                snapshot.Commit,
+                cancellationToken)
+            .ConfigureAwait(false);
         var relativeTarget = Path.GetRelativePath(currentRepositoryRoot, currentTarget);
         var snapshotTarget = Path.GetFullPath(Path.Combine(snapshot.SnapshotDirectory, relativeTarget));
         EnsureWithinRepository(snapshotTarget, snapshot.SnapshotDirectory, "The snapshot target");
@@ -129,7 +155,18 @@ public static class Program
                 $"The target '{ToPortableDisplayPath(currentTarget, currentRepositoryRoot)}' does not exist in Git reference '{options.GitReference}'.");
         }
 
-        var current = await AnalyzeAsync(options, error, cancellationToken, currentRepositoryRoot).ConfigureAwait(false);
+        using var currentRuntimeRoot = OwnedTemporaryDirectory.Create(currentRepositoryRoot);
+        using var baselineRuntimeRoot = OwnedTemporaryDirectory.Create(currentRepositoryRoot);
+        var untrustedRoots = new[] { currentRepositoryRoot, snapshot.SnapshotDirectory };
+        var currentRuntime = CreateDiffRuntime(currentRuntimeRoot.DirectoryPath, untrustedRoots, processRunner);
+        var baselineRuntime = CreateDiffRuntime(baselineRuntimeRoot.DirectoryPath, untrustedRoots, processRunner);
+        var current = await AnalyzeAsync(
+            options,
+            error,
+            cancellationToken,
+            currentRepositoryRoot,
+            packagesDirectory: currentRuntime.PackagesDirectory,
+            processRunnerOverride: currentRuntime.ProcessRunner).ConfigureAwait(false);
         var baselineOptions = options with
         {
             Path = snapshotTarget,
@@ -143,14 +180,17 @@ public static class Program
             baselineOptions,
             error,
             cancellationToken,
-            snapshot.SnapshotDirectory).ConfigureAwait(false);
+            snapshot.SnapshotDirectory,
+            packagesDirectory: baselineRuntime.PackagesDirectory,
+            processRunnerOverride: baselineRuntime.ProcessRunner).ConfigureAwait(false);
         var comparison = AnalysisDiffComparer.Compare(
             baseline.Result,
             snapshot.SnapshotDirectory,
             current.Result,
             currentRepositoryRoot,
             snapshot.Reference,
-            snapshot.Commit);
+            snapshot.Commit,
+            current.Context.Policy.Impact);
 
         var gateFingerprints = comparison.Changes
             .Where(change => change.Kind == DiagnosticChangeKind.Added ||
@@ -158,10 +198,10 @@ public static class Program
                              change.After!.Severity > change.Before!.Severity)
             .Select(change => change.Fingerprint)
             .ToHashSet(StringComparer.Ordinal);
-        var gateDiagnostics = current.Result.Diagnostics
-            .Where(diagnostic => gateFingerprints.Contains(
-                DiagnosticFingerprint.Compute(diagnostic, currentRepositoryRoot)))
-            .ToArray();
+        var gateDiagnostics = AnalysisDiffComparer.SelectDiagnosticsByFingerprint(
+            current.Result,
+            currentRepositoryRoot,
+            gateFingerprints);
         var diffResult = current.Result with
         {
             Diagnostics = gateDiagnostics,
@@ -189,8 +229,885 @@ public static class Program
             return 2;
         }
 
-        return ReachesThreshold(gateDiagnostics, current.Context.Policy.FailOn) ? 1 : 0;
+        return comparison.Impact?.GatePassed == false ||
+               ReachesThreshold(gateDiagnostics, current.Context.Policy.FailOn)
+            ? 1
+            : 0;
     }
+
+    private static async Task<int> RunSimulationV2Async(
+        CliOptions options,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        PackageVersionEditor.ValidatePackageId(options.SimulationPackageId!);
+        PackageVersionEditor.ValidateExactVersion(options.SimulationTargetVersion!);
+        var repositoryRoot = FindRepositoryRoot(options.Path);
+        var currentTarget = Path.GetFullPath(options.Path ?? Directory.GetCurrentDirectory());
+        EnsureWithinRepository(currentTarget, repositoryRoot, "The simulation target");
+        if (!File.Exists(currentTarget) && !Directory.Exists(currentTarget))
+        {
+            throw new ArgumentException($"The simulation target does not exist: {currentTarget}");
+        }
+
+        var explicitCredentials = ReadExplicitCredentialEnvironment(options);
+        var processRunner = new ProcessRunner();
+        var worktreeInspector = new GitWorkingTreeInspector(processRunner);
+        await worktreeInspector.EnsureCleanAsync(repositoryRoot, cancellationToken).ConfigureAwait(false);
+        await worktreeInspector.EnsureArchiveSemanticsAreReproducibleAsync(repositoryRoot, cancellationToken)
+            .ConfigureAwait(false);
+        var (report, exitCode) = await CreateSimulationReportAsync(
+            options,
+            repositoryRoot,
+            currentTarget,
+            explicitCredentials,
+            processRunner,
+            error,
+            cancellationToken).ConfigureAwait(false);
+
+        // The output file is the only intentional repository write and is produced after
+        // both owned snapshots have been deleted and the original checkout revalidated.
+        await worktreeInspector.EnsureCleanAsync(repositoryRoot, cancellationToken).ConfigureAwait(false);
+        var rendered = options.Format == OutputFormat.Json
+            ? DependencySimulationSerializer.SerializeJson(report) + "\n"
+            : DependencySimulationSerializer.SerializeText(report);
+        if (options.OutputPath is null)
+        {
+            await output.WriteAsync(rendered).ConfigureAwait(false);
+        }
+        else
+        {
+            await AtomicOutputFile.WriteAsync(options.OutputPath, rendered, cancellationToken).ConfigureAwait(false);
+            if (options.Verbosity != OutputVerbosity.Quiet)
+            {
+                await error.WriteLineAsync($"Wrote dependency simulation report to {options.OutputPath}")
+                    .ConfigureAwait(false);
+            }
+        }
+
+        return exitCode;
+    }
+
+    private static async Task<(DependencySimulationReport Report, int ExitCode)> CreateSimulationReportAsync(
+        CliOptions options,
+        string repositoryRoot,
+        string currentTarget,
+        IReadOnlyDictionary<string, string> explicitCredentials,
+        IProcessRunner processRunner,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        GitSnapshot? ownedBaseline = null;
+        GitSnapshot? ownedCandidate = null;
+        try
+        {
+            var baselineSnapshot = ownedBaseline = await new GitSnapshotProvider(processRunner)
+                    .MaterializeAsync(repositoryRoot, "HEAD", cancellationToken)
+                    .ConfigureAwait(false);
+            var candidateSnapshot = ownedCandidate = await new GitSnapshotProvider(processRunner)
+                    .MaterializeAsync(repositoryRoot, baselineSnapshot.Commit, cancellationToken)
+                    .ConfigureAwait(false);
+            if (!baselineSnapshot.Commit.Equals(candidateSnapshot.Commit, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("The independent simulation snapshots do not resolve to the same commit.");
+            }
+
+            var relativeTarget = Path.GetRelativePath(repositoryRoot, currentTarget);
+            var baselineTarget = MapSimulationTarget(baselineSnapshot.SnapshotDirectory, relativeTarget);
+            var candidateTarget = MapSimulationTarget(candidateSnapshot.SnapshotDirectory, relativeTarget);
+            var baselineOptions = CreateSnapshotSimulationOptions(
+                options,
+                repositoryRoot,
+                baselineSnapshot.SnapshotDirectory,
+                baselineTarget);
+            var candidateOptions = CreateSnapshotSimulationOptions(
+                options,
+                repositoryRoot,
+                candidateSnapshot.SnapshotDirectory,
+                candidateTarget);
+            var baselineRuntime = CreateSimulationRuntime(
+                baselineSnapshot.SnapshotDirectory,
+                repositoryRoot,
+                explicitCredentials,
+                processRunner);
+            var candidateRuntime = CreateSimulationRuntime(
+                candidateSnapshot.SnapshotDirectory,
+                repositoryRoot,
+                explicitCredentials,
+                processRunner);
+
+            var baseline = await AnalyzeAsync(
+                baselineOptions,
+                error,
+                cancellationToken,
+                baselineSnapshot.SnapshotDirectory,
+                packagesDirectory: baselineRuntime.PackagesDirectory,
+                processRunnerOverride: baselineRuntime.ProcessRunner).ConfigureAwait(false);
+            if (baseline.HasOperationalError)
+            {
+                throw new InvalidOperationException(
+                    "The independent baseline restore or analysis was incomplete; no candidate mutation was attempted.");
+            }
+
+            var selectedPackages = SelectAndMapSimulationPackages(
+                baseline.Result.Packages,
+                baselineSnapshot.SnapshotDirectory,
+                candidateSnapshot.SnapshotDirectory,
+                options.SimulationPackageId!);
+            var expectedSourceHash = ComputeObservedDeclarationHash(
+                baseline.Result.Packages,
+                baselineSnapshot.SnapshotDirectory,
+                options.SimulationPackageId!);
+            var edit = PackageVersionEditor.Apply(new PackageVersionEditRequest(
+                candidateSnapshot.SnapshotDirectory,
+                options.SimulationPackageId!,
+                options.SimulationTargetVersion!,
+                selectedPackages)
+            {
+                ExpectedSourceSha256 = expectedSourceHash,
+            });
+            var lockedMode = ResolveSimulationLockedMode(
+                baseline.Result.ProjectSettings,
+                baselineSnapshot.SnapshotDirectory,
+                edit.AffectedProjects);
+            var candidateDiscovery = new ProjectDiscovery().Discover(
+                candidateTarget,
+                candidateSnapshot.SnapshotDirectory);
+            var (candidateConfiguration, _, candidateConfigurationDirectory) = LoadConfiguration(
+                candidateOptions,
+                candidateSnapshot.SnapshotDirectory);
+            var restoreTimeout = AnalysisPolicyResolver.Resolve(
+                candidateConfiguration,
+                candidateConfigurationDirectory,
+                new AnalysisPolicyOverrides(
+                    candidateOptions.FailOn,
+                    null,
+                    null,
+                    candidateOptions.RestoreTimeoutSeconds,
+                    candidateOptions.EvaluationTimeoutSeconds)).Timeouts.Restore;
+            var restoreRunner = new RestoreRunner(
+                candidateRuntime.ProcessRunner,
+                restoreTimeout,
+                candidateOptions.MaxParallelism ?? candidateConfiguration.MaxParallelism ??
+                AnalysisExecutionOptions.Default.MaxDegreeOfParallelism);
+            var candidateRestore = await restoreRunner.RestoreDetailedAsync(
+                candidateDiscovery,
+                options.Verbosity == OutputVerbosity.Quiet ? null : message => error.WriteLine(message),
+                cancellationToken,
+                forceEvaluate: lockedMode == DependencySimulationLockedMode.NotEnabled,
+                candidateRuntime.PackagesDirectory).ConfigureAwait(false);
+            VerifySimulationMutationHash(candidateSnapshot.SnapshotDirectory, edit);
+
+            if (!candidateRestore.Succeeded)
+            {
+                return CreateFailedRestoreSimulation(
+                    options,
+                    baselineSnapshot.Commit,
+                    relativeTarget,
+                    edit,
+                    lockedMode,
+                    candidateRestore);
+            }
+
+            var candidate = await AnalyzeAsync(
+                candidateOptions with { NoRestore = true },
+                error,
+                cancellationToken,
+                candidateSnapshot.SnapshotDirectory,
+                packagesDirectory: candidateRuntime.PackagesDirectory,
+                preparedRestore: candidateRestore,
+                processRunnerOverride: candidateRuntime.ProcessRunner).ConfigureAwait(false);
+            if (candidate.HasOperationalError)
+            {
+                var report = CreateUnavailableSimulationReport(
+                    options,
+                    baselineSnapshot.Commit,
+                    relativeTarget,
+                    edit,
+                    lockedMode,
+                    DependencySimulationVerificationStatus.Passed,
+                    null,
+                    DependencySimulationVerdict.Incomplete,
+                    [],
+                    ["The candidate restore completed, but dependency evaluation or the requested package audit was incomplete."],
+                    "candidateAnalysisIncomplete");
+                return (report, 2);
+            }
+
+            var comparison = AnalysisDiffComparer.Compare(
+                baseline.Result,
+                baselineSnapshot.SnapshotDirectory,
+                candidate.Result,
+                candidateSnapshot.SnapshotDirectory,
+                $"time-machine:{options.SimulationPackageId}",
+                baselineSnapshot.Commit,
+                candidate.Context.Policy.Impact);
+            if (!comparison.IsComplete)
+            {
+                var report = CreateUnavailableSimulationReport(
+                    options,
+                    baselineSnapshot.Commit,
+                    relativeTarget,
+                    edit,
+                    lockedMode,
+                    DependencySimulationVerificationStatus.Passed,
+                    null,
+                    DependencySimulationVerdict.Incomplete,
+                    [],
+                    ["The dependency comparison was incomplete."],
+                    "comparisonIncomplete");
+                return (report, 2);
+            }
+
+            var resolutionError = ValidateCandidateResolution(
+                baseline.Result,
+                baselineSnapshot.SnapshotDirectory,
+                candidate.Result,
+                candidateSnapshot.SnapshotDirectory,
+                options.SimulationPackageId!,
+                options.SimulationTargetVersion!);
+            var rejectionReasons = EvaluateSimulationRejectionReasons(
+                comparison,
+                candidate,
+                candidateSnapshot.SnapshotDirectory,
+                resolutionError);
+            var noChange = HasNoObservedSimulationImpact(comparison);
+            var verdict = rejectionReasons.Count > 0
+                ? DependencySimulationVerdict.Reject
+                : noChange
+                    ? DependencySimulationVerdict.NoChange
+                    : DependencySimulationVerdict.Pass;
+            var completedReport = new DependencySimulationReport(
+                DependencySimulationReport.CurrentSchemaVersion,
+                PackageMedicAnalyzer.Version,
+                new DependencySimulationRepository(
+                    baselineSnapshot.Commit,
+                    ToPortableSimulationPath(relativeTarget),
+                    WorkingTreeRequiredClean: true),
+                new DependencySimulationRequest(options.SimulationPackageId!, options.SimulationTargetVersion!),
+                DependencySimulationMutation.From(edit),
+                DependencySimulationVerification.RestoreOnly(
+                    DependencySimulationVerificationStatus.Passed,
+                    options.AuditVulnerabilities,
+                    options.AuditDeprecatedPackages,
+                    lockedMode),
+                CreateSimulationComparison(comparison),
+                verdict,
+                rejectionReasons,
+                []);
+            return (completedReport, verdict == DependencySimulationVerdict.Reject ? 1 : 0);
+        }
+        catch (Exception operationError)
+        {
+            var cleanupErrors = DisposeSimulationSnapshots(ownedCandidate, ownedBaseline);
+            ownedCandidate = null;
+            ownedBaseline = null;
+            if (cleanupErrors.Count > 0)
+            {
+                throw new AggregateException(
+                    "Dependency simulation failed and one or more owned snapshots could not be cleaned up.",
+                    [operationError, .. cleanupErrors]);
+            }
+
+            throw;
+        }
+        finally
+        {
+            if (ownedCandidate is not null || ownedBaseline is not null)
+            {
+                var cleanupErrors = DisposeSimulationSnapshots(ownedCandidate, ownedBaseline);
+                if (cleanupErrors.Count > 0)
+                {
+                    throw new AggregateException(
+                        "Dependency simulation completed, but one or more owned snapshots could not be cleaned up.",
+                        cleanupErrors);
+                }
+            }
+        }
+    }
+
+    internal static bool HasNoObservedSimulationImpact(AnalysisDiffReport comparison)
+    {
+        if (comparison.Changes.Count != 0 || comparison.ProjectSettingsChanges.Count != 0)
+        {
+            return false;
+        }
+
+        if (comparison.RiskSummary.VulnerabilitiesIntroduced > 0 ||
+            comparison.RiskSummary.VulnerabilitiesResolved > 0 ||
+            comparison.RiskSummary.DeprecationsIntroduced > 0 ||
+            comparison.RiskSummary.DeprecationsResolved > 0)
+        {
+            return false;
+        }
+
+        return comparison.PackageChanges.All(change =>
+            change.Before is not null &&
+            change.After is not null &&
+            change.Before.ResolvedVersion.Equals(change.After.ResolvedVersion, StringComparison.OrdinalIgnoreCase) &&
+            change.Before.DependencyKind == change.After.DependencyKind &&
+            string.Equals(change.Before.PackageSource, change.After.PackageSource, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(change.Before.ContentHash, change.After.ContentHash, StringComparison.Ordinal) &&
+            change.Before.SignaturePresent == change.After.SignaturePresent);
+    }
+
+    private static IReadOnlyList<Exception> DisposeSimulationSnapshots(
+        GitSnapshot? candidate,
+        GitSnapshot? baseline)
+    {
+        var errors = new List<Exception>();
+        foreach (var snapshot in new[] { candidate, baseline })
+        {
+            if (snapshot is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                snapshot.Dispose();
+            }
+            catch (Exception exception)
+            {
+                errors.Add(exception);
+            }
+        }
+
+        return errors;
+    }
+
+    private static IReadOnlyDictionary<string, string> ReadExplicitCredentialEnvironment(CliOptions options)
+    {
+        var values = new Dictionary<string, string>(OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal);
+        foreach (var name in options.SimulationCredentialEnvironmentVariables ?? [])
+        {
+            ProcessEnvironment.ValidateVariableName(name);
+            var value = Environment.GetEnvironmentVariable(name);
+            if (string.IsNullOrEmpty(value))
+            {
+                throw new UsageException(
+                    $"Credential environment variable '{name}' is not defined or is empty in the current process.");
+            }
+
+            values.Add(name, value);
+        }
+
+        return values;
+    }
+
+    private static string MapSimulationTarget(string snapshotRoot, string relativeTarget)
+    {
+        var target = Path.GetFullPath(Path.Combine(snapshotRoot, relativeTarget));
+        EnsureWithinRepository(target, snapshotRoot, "The snapshot simulation target");
+        if (!File.Exists(target) && !Directory.Exists(target))
+        {
+            throw new InvalidOperationException(
+                "The selected simulation target is not a tracked file or directory in the current HEAD commit.");
+        }
+
+        if (!ProjectDiscovery.IsSafelyContained(snapshotRoot, target))
+        {
+            throw new InvalidOperationException("The snapshot simulation target crosses a symbolic-link boundary.");
+        }
+
+        return target;
+    }
+
+    private static CliOptions CreateSnapshotSimulationOptions(
+        CliOptions options,
+        string repositoryRoot,
+        string snapshotRoot,
+        string snapshotTarget) => options with
+        {
+            Path = snapshotTarget,
+            OutputPath = null,
+            SarifOutputPath = null,
+            BaselinePath = null,
+            FailOnNew = null,
+            GitReference = null,
+            ConfigurationPath = MapSimulationConfiguration(
+            options.ConfigurationPath,
+            repositoryRoot,
+            snapshotRoot),
+        };
+
+    private static SimulationRuntime CreateSimulationRuntime(
+        string snapshotRoot,
+        string repositoryRoot,
+        IReadOnlyDictionary<string, string> explicitCredentials,
+        IProcessRunner processRunner)
+    {
+        var cacheRoot = Path.Combine(snapshotRoot, ".packagemedic-time-machine");
+        if (File.Exists(cacheRoot) || Directory.Exists(cacheRoot))
+        {
+            throw new InvalidOperationException(
+                "The repository already contains the reserved '.packagemedic-time-machine' path.");
+        }
+
+        var packagesDirectory = Path.Combine(cacheRoot, "nuget", "packages");
+        var environment = ProcessEnvironment.CreateIsolatedDotNet(
+            cacheRoot,
+            packagesDirectory,
+            explicitCredentials,
+            explicitCredentials.Keys.ToArray(),
+            [repositoryRoot, snapshotRoot]);
+        return new SimulationRuntime(
+            new EnvironmentScopedProcessRunner(processRunner, environment),
+            packagesDirectory);
+    }
+
+    private static SimulationRuntime CreateDiffRuntime(
+        string runtimeRoot,
+        IReadOnlyList<string> untrustedRoots,
+        IProcessRunner processRunner)
+    {
+        var packagesDirectory = Directory.CreateDirectory(Path.Combine(runtimeRoot, "nuget", "packages")).FullName;
+        var httpCache = Directory.CreateDirectory(Path.Combine(runtimeRoot, "nuget", "http-cache")).FullName;
+        var pluginCache = Directory.CreateDirectory(Path.Combine(runtimeRoot, "nuget", "plugins-cache")).FullName;
+        var dotnetHome = Directory.CreateDirectory(Path.Combine(runtimeRoot, "dotnet-home")).FullName;
+        var temporary = Directory.CreateDirectory(Path.Combine(runtimeRoot, "temp")).FullName;
+        var environment = ProcessEnvironment.CreateOverrides(
+            new Dictionary<string, string?>(OperatingSystem.IsWindows()
+                ? StringComparer.OrdinalIgnoreCase
+                : StringComparer.Ordinal)
+            {
+                ["NUGET_PACKAGES"] = packagesDirectory,
+                ["NUGET_HTTP_CACHE_PATH"] = httpCache,
+                ["NUGET_PLUGINS_CACHE_PATH"] = pluginCache,
+                ["DOTNET_CLI_HOME"] = dotnetHome,
+                ["TEMP"] = temporary,
+                ["TMP"] = temporary,
+                ["TMPDIR"] = temporary,
+                ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
+                ["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1",
+                ["DOTNET_NOLOGO"] = "1",
+                ["MSBUILDDISABLENODEREUSE"] = "1",
+                ["NUGET_XMLDOC_MODE"] = "skip",
+            },
+            untrustedExecutableRoots: untrustedRoots);
+        return new SimulationRuntime(
+            new EnvironmentScopedProcessRunner(processRunner, environment),
+            packagesDirectory);
+    }
+
+    private static IReadOnlyList<PackageInventoryItem> SelectAndMapSimulationPackages(
+        IReadOnlyList<PackageInventoryItem> packages,
+        string baselineRoot,
+        string candidateRoot,
+        string packageId) => packages
+        .Where(item => item.Id.Equals(packageId, StringComparison.OrdinalIgnoreCase))
+        .Select(item => item with
+        {
+            Project = MapSnapshotFile(item.Project, baselineRoot, candidateRoot, "An affected project"),
+            SourceFile = item.SourceFile is null
+                ? null
+                : MapSnapshotFile(item.SourceFile, baselineRoot, candidateRoot, "The package declaration"),
+        })
+        .ToArray();
+
+    private static string MapSnapshotFile(
+        string value,
+        string sourceRoot,
+        string destinationRoot,
+        string description)
+    {
+        var source = Path.GetFullPath(value, sourceRoot);
+        if (!File.Exists(source) || !ProjectDiscovery.IsSafelyContained(sourceRoot, source))
+        {
+            throw new InvalidOperationException($"{description} is not a regular contained snapshot file.");
+        }
+
+        var destination = Path.GetFullPath(Path.Combine(destinationRoot, Path.GetRelativePath(sourceRoot, source)));
+        if (!File.Exists(destination) || !ProjectDiscovery.IsSafelyContained(destinationRoot, destination))
+        {
+            throw new InvalidOperationException($"{description} is missing from the independent candidate snapshot.");
+        }
+
+        return destination;
+    }
+
+    private static string ComputeObservedDeclarationHash(
+        IReadOnlyList<PackageInventoryItem> packages,
+        string baselineRoot,
+        string packageId)
+    {
+        var matchingPackages = packages
+            .Where(item => item.Id.Equals(packageId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (matchingPackages.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"Simulation refused: package '{packageId}' was not found in the selected dependency graph.");
+        }
+
+        if (matchingPackages.All(item => item.DependencyKind == PackageDependencyKind.Transitive))
+        {
+            throw new InvalidOperationException(
+                $"Simulation refused: package '{packageId}' is transitive-only and has no direct declaration to mutate.");
+        }
+
+        var matches = matchingPackages
+            .Where(item => item.DependencyKind == PackageDependencyKind.Direct)
+            .Where(item => item.SourceFile is not null && item.SourceLine is > 0)
+            .GroupBy(
+                item => string.Join(
+                    '\n',
+                    Path.GetFullPath(item.SourceFile!, baselineRoot),
+                    item.SourceLine,
+                    item.VersionSource,
+                    item.RequestedVersion),
+                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToArray();
+        if (matches.Length != 1)
+        {
+            var candidates = packages
+                .Where(item => item.DependencyKind == PackageDependencyKind.Direct &&
+                               item.Id.Equals(packageId, StringComparison.OrdinalIgnoreCase))
+                .Take(10)
+                .Select(item => item.SourceFile is null
+                    ? $"- implicit source for {item.Framework}"
+                    : $"- {ToPortableDisplayPath(item.SourceFile, baselineRoot)}:{item.SourceLine} for {item.Framework} via {item.VersionSource}");
+            var detail = string.Join(Environment.NewLine, candidates);
+            throw new InvalidOperationException(
+                $"Simulation refused: package '{packageId}' does not have exactly one effective declaration in the selected scope." +
+                (detail.Length == 0 ? string.Empty : Environment.NewLine + detail) +
+                Environment.NewLine + "Specify a narrower project or solution path, or resolve the ambiguity first.");
+        }
+
+        var sourceFile = Path.GetFullPath(matches[0].SourceFile!, baselineRoot);
+        if (!File.Exists(sourceFile) || !ProjectDiscovery.IsSafelyContained(baselineRoot, sourceFile))
+        {
+            throw new InvalidOperationException("The observed package declaration is outside the immutable baseline snapshot.");
+        }
+
+        if (new FileInfo(sourceFile).Length > PackageVersionEditor.MaximumMutationXmlBytes)
+        {
+            throw new InvalidDataException(
+                $"The package declaration exceeds the {PackageVersionEditor.MaximumMutationXmlBytes}-byte simulation limit.");
+        }
+
+        using var stream = new FileStream(sourceFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    private static void VerifySimulationMutationHash(
+        string snapshotRoot,
+        PackageVersionEditResult edit)
+    {
+        var sourceFile = Path.GetFullPath(Path.Combine(snapshotRoot, edit.File));
+        if (!File.Exists(sourceFile) ||
+            !ProjectDiscovery.IsSafelyContained(snapshotRoot, sourceFile) ||
+            new FileInfo(sourceFile).Length > PackageVersionEditor.MaximumMutationXmlBytes)
+        {
+            throw new InvalidOperationException(
+                "The candidate package declaration changed its trusted filesystem boundary during restore.");
+        }
+
+        using var stream = new FileStream(sourceFile, FileMode.Open, FileAccess.Read, FileShare.Read);
+        var observed = SHA256.HashData(stream);
+        if (!CryptographicOperations.FixedTimeEquals(
+                observed,
+                Convert.FromHexString(edit.SourceSha256After)))
+        {
+            throw new InvalidOperationException(
+                "The candidate package declaration was modified during restore; the simulation is incomplete.");
+        }
+    }
+
+    private static (DependencySimulationReport Report, int ExitCode) CreateFailedRestoreSimulation(
+        CliOptions options,
+        string commit,
+        string relativeTarget,
+        PackageVersionEditResult edit,
+        DependencySimulationLockedMode lockedMode,
+        RestoreExecutionResult restore)
+    {
+        var failureKind = ClassifySimulationRestoreFailure(restore, lockedMode);
+        if (restore.FailureKind == RestoreProcessFailureKind.Rejected &&
+            IsDeterministicCandidateRejection(failureKind))
+        {
+            var reason = DescribeSimulationRestoreRejection(failureKind, restore.Diagnostics);
+            return (
+                CreateUnavailableSimulationReport(
+                    options,
+                    commit,
+                    relativeTarget,
+                    edit,
+                    lockedMode,
+                    DependencySimulationVerificationStatus.Failed,
+                    failureKind,
+                    DependencySimulationVerdict.Reject,
+                    [reason],
+                    [],
+                    "candidateRestoreFailed"),
+                1);
+        }
+
+        var error = restore.FailureKind switch
+        {
+            RestoreProcessFailureKind.TimedOut => "The candidate restore exceeded the configured timeout.",
+            RestoreProcessFailureKind.OutputLimitExceeded => "The candidate restore exceeded the subprocess output safety limit.",
+            _ => failureKind switch
+            {
+                DependencySimulationRestoreFailureKind.AuthenticationFailed =>
+                    "The candidate restore could not authenticate to a configured package source.",
+                DependencySimulationRestoreFailureKind.SourceUnavailable =>
+                    "A configured package source was unavailable during candidate restore.",
+                _ => "The candidate restore could not be evaluated because of an operational failure.",
+            },
+        };
+        return (
+            CreateUnavailableSimulationReport(
+                options,
+                commit,
+                relativeTarget,
+                edit,
+                lockedMode,
+                DependencySimulationVerificationStatus.Failed,
+                failureKind,
+                DependencySimulationVerdict.Incomplete,
+                [],
+                [error],
+                "candidateRestoreIncomplete"),
+            2);
+    }
+
+    private static DependencySimulationReport CreateUnavailableSimulationReport(
+        CliOptions options,
+        string commit,
+        string relativeTarget,
+        PackageVersionEditResult edit,
+        DependencySimulationLockedMode lockedMode,
+        DependencySimulationVerificationStatus restoreStatus,
+        DependencySimulationRestoreFailureKind? restoreFailureKind,
+        DependencySimulationVerdict verdict,
+        IReadOnlyList<string> rejectionReasons,
+        IReadOnlyList<string> errors,
+        string unavailableReason) => new(
+            DependencySimulationReport.CurrentSchemaVersion,
+            PackageMedicAnalyzer.Version,
+            new DependencySimulationRepository(
+                commit,
+                ToPortableSimulationPath(relativeTarget),
+                WorkingTreeRequiredClean: true),
+            new DependencySimulationRequest(options.SimulationPackageId!, options.SimulationTargetVersion!),
+            DependencySimulationMutation.From(edit),
+            DependencySimulationVerification.RestoreOnly(
+                restoreStatus,
+                auditedVulnerabilities: false,
+                auditedDeprecations: false,
+                lockedMode,
+                restoreFailureKind),
+            EmptySimulationComparison(unavailableReason),
+            verdict,
+            rejectionReasons,
+            errors);
+
+    private static DependencySimulationComparison EmptySimulationComparison(string reason) => new(
+        new AnalysisDiffSummary(0, 0, 0),
+        [],
+        new PackageDiffSummary(0, 0, 0, 0, 0, 0, 0, 0),
+        [],
+        new DependencyRiskDiffSummary(0, 0, 0, 0),
+        [],
+        null)
+    {
+        IsComplete = false,
+        UnavailableReason = reason,
+    };
+
+    internal static DependencySimulationLockedMode ResolveSimulationLockedMode(
+        IReadOnlyList<ProjectPackageSettings> projectSettings,
+        string snapshotRoot,
+        IReadOnlyList<string> affectedProjects)
+    {
+        var affected = affectedProjects
+            .Select(ToPortableSimulationPath)
+            .ToHashSet(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var matched = projectSettings
+            .Where(item => affected.Contains(ToPortableSimulationPath(
+                Path.GetRelativePath(snapshotRoot, item.Project))))
+            .Select(item => item.RestoreLockedMode)
+            .ToArray();
+        if (matched.Length != affected.Count)
+        {
+            throw new InvalidOperationException(
+                "Could not determine locked-restore state for every project affected by the candidate.");
+        }
+
+        return matched.All(value => value)
+            ? DependencySimulationLockedMode.Enforced
+            : matched.Any(value => value)
+                ? DependencySimulationLockedMode.Mixed
+                : DependencySimulationLockedMode.NotEnabled;
+    }
+
+    internal static DependencySimulationRestoreFailureKind ClassifySimulationRestoreFailure(
+        RestoreExecutionResult restore,
+        DependencySimulationLockedMode lockedMode)
+    {
+        if (restore.FailureKind == RestoreProcessFailureKind.TimedOut)
+        {
+            return DependencySimulationRestoreFailureKind.TimedOut;
+        }
+
+        if (restore.FailureKind == RestoreProcessFailureKind.OutputLimitExceeded)
+        {
+            return DependencySimulationRestoreFailureKind.OutputLimitExceeded;
+        }
+
+        if (restore.Errors.Any(item =>
+                item.Contains("401", StringComparison.OrdinalIgnoreCase) ||
+                item.Contains("403", StringComparison.OrdinalIgnoreCase) ||
+                item.Contains("unauthorized", StringComparison.OrdinalIgnoreCase) ||
+                item.Contains("forbidden", StringComparison.OrdinalIgnoreCase)))
+            return DependencySimulationRestoreFailureKind.AuthenticationFailed;
+
+        var codes = restore.Diagnostics
+            .Select(item => item.OriginalCode)
+            .Where(item => item is not null)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (codes.Contains("NU1300") || codes.Contains("NU1301"))
+            return DependencySimulationRestoreFailureKind.SourceUnavailable;
+        if (lockedMode is DependencySimulationLockedMode.Enforced or DependencySimulationLockedMode.Mixed &&
+            (codes.Contains("NU1004") || codes.Contains("NU1005")))
+        {
+            return DependencySimulationRestoreFailureKind.LockedModeConflict;
+        }
+
+        if (codes.Contains("NU1101")) return DependencySimulationRestoreFailureKind.PackageNotFound;
+        if (codes.Contains("NU1102")) return DependencySimulationRestoreFailureKind.VersionNotFound;
+        if (codes.Contains("NU1106") || codes.Contains("NU1107") || codes.Contains("NU1605"))
+            return DependencySimulationRestoreFailureKind.DependencyConflict;
+        return DependencySimulationRestoreFailureKind.Unknown;
+    }
+
+    internal static bool IsDeterministicCandidateRejection(
+        DependencySimulationRestoreFailureKind failureKind) => failureKind is
+        DependencySimulationRestoreFailureKind.PackageNotFound or
+        DependencySimulationRestoreFailureKind.VersionNotFound or
+        DependencySimulationRestoreFailureKind.DependencyConflict or
+        DependencySimulationRestoreFailureKind.LockedModeConflict;
+
+    private static string DescribeSimulationRestoreRejection(
+        DependencySimulationRestoreFailureKind failureKind,
+        IReadOnlyList<Diagnostic> diagnostics)
+    {
+        var code = diagnostics.Select(item => item.OriginalCode)
+            .FirstOrDefault(item => !string.IsNullOrWhiteSpace(item));
+        var suffix = code is null ? string.Empty : $" ({code})";
+        return failureKind switch
+        {
+            DependencySimulationRestoreFailureKind.LockedModeConflict =>
+                "The candidate requires regenerating the NuGet lock file and is not applicable while locked mode is enforced." + suffix,
+            DependencySimulationRestoreFailureKind.PackageNotFound =>
+                "The candidate package was not found in the configured package sources." + suffix,
+            DependencySimulationRestoreFailureKind.VersionNotFound =>
+                "The requested candidate version was not found in the configured package sources." + suffix,
+            DependencySimulationRestoreFailureKind.DependencyConflict =>
+                "The candidate produced a NuGet dependency conflict." + suffix,
+            DependencySimulationRestoreFailureKind.AuthenticationFailed =>
+                "The candidate restore could not authenticate to a configured package source." + suffix,
+            DependencySimulationRestoreFailureKind.SourceUnavailable =>
+                "A configured package source was unavailable during candidate restore." + suffix,
+            _ => "The candidate restore was rejected by NuGet in this environment." + suffix,
+        };
+    }
+
+    private static IReadOnlyList<string> EvaluateSimulationRejectionReasons(
+        AnalysisDiffReport comparison,
+        PreparedAnalysis candidate,
+        string candidateRoot,
+        string? resolutionError)
+    {
+        var reasons = new List<string>();
+        if (resolutionError is not null)
+        {
+            reasons.Add(resolutionError);
+        }
+
+        if (comparison.Impact is { GatePassed: false } impact)
+        {
+            reasons.AddRange(impact.Violations.Select(item => $"{item.Code}: {item.Message}"));
+        }
+
+        var gateFingerprints = comparison.Changes
+            .Where(change => change.Kind == DiagnosticChangeKind.Added ||
+                             change.Kind == DiagnosticChangeKind.SeverityChanged &&
+                             change.After!.Severity > change.Before!.Severity)
+            .Select(change => change.Fingerprint)
+            .ToHashSet(StringComparer.Ordinal);
+        var introduced = AnalysisDiffComparer.SelectDiagnosticsByFingerprint(
+            candidate.Result,
+            candidateRoot,
+            gateFingerprints);
+        if (ReachesThreshold(introduced, candidate.Context.Policy.FailOn))
+        {
+            reasons.AddRange(introduced
+                .Where(item => candidate.Context.Policy.FailOn switch
+                {
+                    PolicyFailureLevel.Warning => item.Severity >= DiagnosticSeverity.Warning,
+                    PolicyFailureLevel.Error => item.Severity >= DiagnosticSeverity.Error,
+                    _ => false,
+                })
+                .Select(item => $"{item.Code}: the candidate introduces {item.Title}."));
+        }
+
+        return reasons.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+    }
+
+    private static DependencySimulationComparison CreateSimulationComparison(AnalysisDiffReport comparison) => new(
+        comparison.Summary,
+        comparison.Changes,
+        comparison.PackageSummary,
+        comparison.PackageChanges,
+        comparison.RiskSummary,
+        comparison.ProjectSettingsChanges,
+        comparison.Impact)
+    {
+        IsComplete = comparison.IsComplete,
+        UnavailableReason = comparison.IsComplete ? null : "comparisonIncomplete",
+    };
+
+    private static string ToPortableSimulationPath(string relativePath)
+    {
+        var normalized = relativePath.Replace('\\', '/');
+        return string.IsNullOrWhiteSpace(normalized) ? "." : normalized;
+    }
+
+    private static string? ValidateCandidateResolution(
+        AnalysisResult baseline,
+        string baselineRoot,
+        AnalysisResult candidate,
+        string candidateRoot,
+        string packageId,
+        string candidateVersion)
+    {
+        var expected = baseline.Packages
+            .Where(item => item.DependencyKind == PackageDependencyKind.Direct &&
+                           item.Id.Equals(packageId, StringComparison.OrdinalIgnoreCase))
+            .Select(item => PackageContext(item, baselineRoot))
+            .ToHashSet(StringComparer.Ordinal);
+        var resolved = candidate.Packages
+            .Where(item => item.DependencyKind == PackageDependencyKind.Direct &&
+                           item.Id.Equals(packageId, StringComparison.OrdinalIgnoreCase) &&
+                           AnalysisDiffComparer.TryCompareResolvedVersions(
+                               item.ResolvedVersion,
+                               candidateVersion,
+                               out var comparison) &&
+                           comparison == 0)
+            .Select(item => PackageContext(item, candidateRoot))
+            .ToHashSet(StringComparer.Ordinal);
+        return expected.Count > 0 && expected.SetEquals(resolved)
+            ? null
+            : $"The candidate did not resolve exact version '{candidateVersion}' in every selected project/framework/runtime context.";
+    }
+
+    private sealed record SimulationRuntime(IProcessRunner ProcessRunner, string PackagesDirectory);
 
     private static async Task WriteAnalysisReportsAsync(
         PreparedAnalysis prepared,
@@ -362,7 +1279,7 @@ public static class Program
             await output.WriteLineAsync($"Would review/remove: {diagnostic.Evidence} ({location})").ConfigureAwait(false);
         }
 
-        await output.WriteLineAsync($"Plan: {candidates.Length} candidate(s); apply is intentionally unavailable in 0.4.").ConfigureAwait(false);
+        await output.WriteLineAsync($"Plan: {candidates.Length} candidate(s); apply is intentionally unavailable in 0.5.").ConfigureAwait(false);
         return 0;
     }
 
@@ -370,7 +1287,11 @@ public static class Program
         CliOptions options,
         TextWriter error,
         CancellationToken cancellationToken,
-        string? repositoryRootOverride = null)
+        string? repositoryRootOverride = null,
+        bool forceEvaluateRestore = false,
+        string? packagesDirectory = null,
+        RestoreExecutionResult? preparedRestore = null,
+        IProcessRunner? processRunnerOverride = null)
     {
         var repositoryRoot = repositoryRootOverride ?? FindRepositoryRoot(options.Path);
         var (configuration, configurationPath, configurationDirectory) = LoadConfiguration(options, repositoryRoot);
@@ -388,35 +1309,43 @@ public static class Program
             policy.Timeouts.Restore,
             policy.Timeouts.Evaluation,
             options.MaxParallelism ?? configuration.MaxParallelism);
-        var analyzer = new PackageMedicAnalyzer(new ProcessRunner(), executionOptions);
+        var processRunner = processRunnerOverride ?? new EnvironmentScopedProcessRunner(
+            new ProcessRunner(),
+            ProcessEnvironment.CreateOverrides(
+                new Dictionary<string, string?>(),
+                untrustedExecutableRoots: [repositoryRoot]));
+        var analyzer = new PackageMedicAnalyzer(processRunner, executionOptions);
         Action<string>? progress = options.Verbosity == OutputVerbosity.Quiet
             ? null
             : message => error.WriteLine(message);
+        var discovered = new ProjectDiscovery().Discover(options.Path, repositoryRoot);
         var outcome = await analyzer.AnalyzeAsync(
-            options.Path,
+            discovered,
             options.NoRestore,
             progress,
             cancellationToken,
-            repositoryRoot).ConfigureAwait(false);
+            repositoryRoot,
+            forceEvaluateRestore,
+            packagesDirectory,
+            preparedRestore).ConfigureAwait(false);
 
         if (options.AuditVulnerabilities)
         {
-            var discovered = new ProjectDiscovery().Discover(options.Path, repositoryRoot);
             var audit = await new VulnerabilityAuditRunner(
-                    new ProcessRunner(),
+                    processRunner,
                     policy.Timeouts.Restore,
                     executionOptions.MaxDegreeOfParallelism)
-                .AuditAsync(discovered, options.IncludeTransitive, progress, cancellationToken)
+                .AuditAsync(
+                    discovered,
+                    options.IncludeTransitive,
+                    progress,
+                    cancellationToken,
+                    outcome.Result.Packages)
                 .ConfigureAwait(false);
-            var auditDiagnostics = outcome.Result.Diagnostics.Concat(audit.Diagnostics)
-                .DistinctBy(item => $"{item.Code}|{item.OriginalCode}|{item.Project}|{item.File}|{item.Line}|{item.Evidence}", StringComparer.Ordinal)
-                .OrderByDescending(item => item.Severity)
-                .ThenBy(item => item.Code, StringComparer.Ordinal)
-                .ThenBy(item => item.Project, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(item => item.File, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(item => item.Line)
-                .ThenBy(item => item.Evidence, StringComparer.Ordinal)
-                .ToArray();
+            var restoreDiagnostics = VulnerabilityAuditParser.CoalesceRestoreDiagnostics(
+                outcome.Result.Diagnostics,
+                audit.Vulnerabilities);
+            var auditDiagnostics = MergeDiagnostics(restoreDiagnostics, audit.Diagnostics);
             var auditErrors = outcome.Result.AnalysisErrors.Concat(audit.Errors)
                 .Distinct(StringComparer.Ordinal)
                 .Order(StringComparer.Ordinal)
@@ -428,6 +1357,35 @@ public static class Program
                     Summary = Recount(outcome.Result.Summary, auditDiagnostics),
                     AnalysisErrors = auditErrors,
                     Vulnerabilities = audit.Vulnerabilities,
+                },
+                outcome.HasOperationalError || audit.HasOperationalError);
+        }
+
+        if (options.AuditDeprecatedPackages)
+        {
+            var audit = await new DeprecationAuditRunner(
+                    processRunner,
+                    policy.Timeouts.Restore,
+                    executionOptions.MaxDegreeOfParallelism)
+                .AuditAsync(
+                    discovered,
+                    options.IncludeTransitiveDeprecatedPackages,
+                    outcome.Result.Packages,
+                    progress,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var auditDiagnostics = MergeDiagnostics(outcome.Result.Diagnostics, audit.Diagnostics);
+            var auditErrors = outcome.Result.AnalysisErrors.Concat(audit.Errors)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
+            outcome = new AnalysisOutcome(
+                outcome.Result with
+                {
+                    Diagnostics = auditDiagnostics,
+                    Summary = Recount(outcome.Result.Summary, auditDiagnostics),
+                    AnalysisErrors = auditErrors,
+                    DeprecatedPackages = audit.DeprecatedPackages,
                 },
                 outcome.HasOperationalError || audit.HasOperationalError);
         }
@@ -452,6 +1410,48 @@ public static class Program
             ToPortableDisplayPath(policy.BaselinePath, repositoryRoot));
         return new PreparedAnalysis(result, outcome.HasOperationalError, context);
     }
+
+    private static Diagnostic[] MergeDiagnostics(
+        IEnumerable<Diagnostic> existing,
+        IEnumerable<Diagnostic> additional) => existing.Concat(additional)
+        .DistinctBy(item => $"{item.Code}|{item.OriginalCode}|{item.Project}|{item.File}|{item.Line}|{item.Evidence}", StringComparer.Ordinal)
+        .OrderByDescending(item => item.Severity)
+        .ThenBy(item => item.Code, StringComparer.Ordinal)
+        .ThenBy(item => item.Project, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(item => item.File, StringComparer.OrdinalIgnoreCase)
+        .ThenBy(item => item.Line)
+        .ThenBy(item => item.Evidence, StringComparer.Ordinal)
+        .ToArray();
+
+    private static string? MapSimulationConfiguration(
+        string? configurationPath,
+        string repositoryRoot,
+        string snapshotRoot)
+    {
+        if (configurationPath is null)
+        {
+            return null;
+        }
+
+        var source = Path.GetFullPath(configurationPath);
+        EnsureWithinRepository(source, repositoryRoot, "The simulation configuration");
+        var mapped = Path.GetFullPath(Path.Combine(snapshotRoot, Path.GetRelativePath(repositoryRoot, source)));
+        EnsureWithinRepository(mapped, snapshotRoot, "The snapshot simulation configuration");
+        if (!File.Exists(mapped))
+        {
+            throw new InvalidOperationException(
+                "The explicit simulation configuration must be a tracked file in the current HEAD commit.");
+        }
+
+        return mapped;
+    }
+
+    private static string PackageContext(PackageInventoryItem item, string repositoryRoot) => string.Join(
+        '\n',
+        DiagnosticFingerprint.GetRelativePath(item.Project, repositoryRoot) ?? Path.GetFileName(item.Project),
+        item.Framework.ToUpperInvariant(),
+        item.RuntimeIdentifier?.ToUpperInvariant() ?? string.Empty,
+        item.Id.ToUpperInvariant());
 
     private static (PackageMedicConfiguration Configuration, string? Path, string Directory) LoadConfiguration(
         CliOptions options,
@@ -684,6 +1684,17 @@ public static class Program
           "timeouts": {
             "restoreSeconds": 300,
             "evaluationSeconds": 60
+          },
+          "impact": {
+            "failOnDowngrade": true,
+            "failOnDirectToTransitive": true,
+            "failOnSourceChange": true,
+            "failOnContentChange": true,
+            "maxAddedPackages": null,
+            "maxAddedTransitivePackages": null,
+            "requirePackageSourceMapping": false,
+            "requireLockedMode": false,
+            "allowedSources": []
           }
         }
         """ + "\n";
@@ -695,6 +1706,7 @@ public static class Program
           package-medic doctor [path] [options]
           package-medic audit [path] [options]
           package-medic diff <git-ref> [path] [options]
+          package-medic simulate <package-id> --to <exact-version> [path] [options]
           package-medic init [directory|file] [--force]
           package-medic baseline create [path] --output <file> [options]
           package-medic baseline update [path] [--baseline <file>] [--output <file>] [options]
@@ -722,20 +1734,36 @@ public static class Program
           --fail-on-new none|warning|error
                                        Fail only on diagnostics absent from baseline
           --audit                      Include official NuGet vulnerability audit data
-          --include-transitive         Audit direct and transitive packages
+          --deprecated                 Include official NuGet package deprecation data
+          --include-transitive         Include transitive packages in every enabled audit
+          --include-transitive-audit   Include transitive vulnerability evidence only
+          --include-transitive-deprecated
+                                       Include transitive deprecation evidence only
 
         Diff behavior:
           Compares the working tree with a safely materialized Git reference.
-          Reports added/resolved/worsened findings, package versions, and CPM changes.
+          Reports findings, upgrades/downgrades, dependency-risk deltas, and CPM changes.
           --baseline and --fail-on-new are intentionally not accepted by diff.
           --no-restore requires usable assets files tracked in both compared trees.
 
+        Dependency Time Machine:
+          Restore-validates one exact package version in two independent snapshots of HEAD.
+          Requires a clean Git worktree and one unambiguous direct/central declaration.
+          --format text|json           Human or schema-versioned simulation report
+          --output, -o <path>          Write the simulation report atomically
+          --audit / --deprecated       Include matching risk deltas when both analyses complete
+          --credential-env <name>      Explicitly inherit and redact one private-feed variable;
+                                       repeat for additional variables
+          Build, tests, and runtime compatibility are not evaluated. Restore still evaluates
+          repository-controlled MSBuild content and may contact configured package sources.
+          --no-restore, baselines, --fail-on-new, and SARIF are intentionally unavailable.
+
         Exit codes:
           0  Analysis completed below the configured thresholds
-          1  A configured diagnostic threshold was reached
+          1  A configured gate was reached or a simulated candidate was rejected
           2  Usage, restore, configuration, or analysis error
 
-        PackageMedic 0.4 remains read-only. clean only supports --dry-run.
+        PackageMedic 0.5 remains read-only. clean only supports --dry-run.
         """;
 
     private sealed record PreparedAnalysis(

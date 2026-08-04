@@ -37,7 +37,7 @@ jobs:
       - run: dotnet build PackageMedic.sln --configuration Release --no-restore
       - run: dotnet test PackageMedic.sln --configuration Release --no-build --no-restore
       - name: Audit the repository dependency graph
-        run: dotnet run --project src/PackageMedic.Cli/PackageMedic.Cli.csproj --configuration Release --no-build -- audit PackageMedic.sln --no-restore --include-transitive --fail-on warning --verbosity quiet
+        run: dotnet run --project src/PackageMedic.Cli/PackageMedic.Cli.csproj --configuration Release --no-build -- audit PackageMedic.sln --no-restore --deprecated --include-transitive-audit --fail-on warning --verbosity quiet
       - run: dotnet pack src/PackageMedic.Cli/PackageMedic.Cli.csproj --configuration Release --no-build --no-restore --output artifacts/release
       - name: Generate SHA-256 checksum
         run: node action/checksum.mjs artifacts/release

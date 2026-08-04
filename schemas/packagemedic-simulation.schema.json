@@ -1,0 +1,427 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/GonzMeza/package-medic/main/schemas/packagemedic-simulation.schema.json",
+  "title": "PackageMedic dependency simulation report",
+  "description": "Schema 1 for the restore-validated Dependency Time Machine report introduced in PackageMedic 0.5.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "toolVersion",
+    "repository",
+    "request",
+    "mutation",
+    "verification",
+    "comparison",
+    "isComplete",
+    "verdict",
+    "rejectionReasons",
+    "errors"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "dependencySimulation" },
+    "toolVersion": { "type": "string", "minLength": 1 },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["headCommit", "analysisTarget", "workingTreeRequiredClean"],
+      "properties": {
+        "headCommit": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+        "analysisTarget": { "$ref": "#/$defs/portablePath" },
+        "workingTreeRequiredClean": { "const": true }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["packageId", "candidateVersion"],
+      "properties": {
+        "packageId": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "candidateVersion": { "type": "string", "minLength": 1, "maxLength": 256 }
+      }
+    },
+    "mutation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packageId", "file", "line", "kind", "beforeVersion", "candidateVersion",
+        "affectedProjects", "noChange", "sourceSha256Before", "sourceSha256After"
+      ],
+      "properties": {
+        "packageId": { "type": "string", "minLength": 1 },
+        "file": { "$ref": "#/$defs/portablePath" },
+        "line": { "type": "integer", "minimum": 1 },
+        "kind": {
+          "enum": ["centralPackageVersion", "packageReferenceVersion", "packageReferenceOverride"]
+        },
+        "beforeVersion": { "type": "string", "minLength": 1 },
+        "candidateVersion": { "type": "string", "minLength": 1 },
+        "affectedProjects": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/portablePath" }
+        },
+        "noChange": { "type": "boolean" },
+        "sourceSha256Before": { "$ref": "#/$defs/sha256" },
+        "sourceSha256After": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "restore", "build", "tests", "runtimeCompatibility", "evidenceLevel",
+        "auditedVulnerabilities", "auditedDeprecations", "lockedMode"
+      ],
+      "properties": {
+        "restore": { "enum": ["passed", "failed", "notRun"] },
+        "restoreFailureKind": {
+          "enum": [
+            "packageNotFound", "versionNotFound", "dependencyConflict", "lockedModeConflict",
+            "sourceUnavailable", "authenticationFailed", "timedOut", "outputLimitExceeded", "unknown"
+          ]
+        },
+        "build": { "const": "notRun" },
+        "tests": { "const": "notRun" },
+        "runtimeCompatibility": { "const": "notVerified" },
+        "evidenceLevel": { "const": "restoreOnly" },
+        "auditedVulnerabilities": { "type": "boolean" },
+        "auditedDeprecations": { "type": "boolean" },
+        "lockedMode": { "enum": ["notEnabled", "enforced", "mixed"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "restore": { "const": "failed" } } },
+          "then": { "required": ["restoreFailureKind"] },
+          "else": { "not": { "required": ["restoreFailureKind"] } }
+        }
+      ]
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "diagnosticSummary", "diagnosticChanges", "packageSummary", "packageChanges",
+        "riskSummary", "projectSettingsChanges", "isComplete"
+      ],
+      "properties": {
+        "diagnosticSummary": { "$ref": "#/$defs/diagnosticSummary" },
+        "diagnosticChanges": { "type": "array", "items": { "$ref": "#/$defs/diagnosticChange" } },
+        "packageSummary": { "$ref": "#/$defs/packageSummary" },
+        "packageChanges": { "type": "array", "items": { "$ref": "#/$defs/packageChange" } },
+        "riskSummary": { "$ref": "#/$defs/riskSummary" },
+        "projectSettingsChanges": { "type": "array", "items": { "$ref": "#/$defs/projectSettingsChange" } },
+        "impact": { "$ref": "#/$defs/impact" },
+        "isComplete": { "type": "boolean" },
+        "unavailableReason": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "isComplete": { "const": false } } },
+          "then": { "required": ["unavailableReason"] },
+          "else": { "not": { "required": ["unavailableReason"] } }
+        }
+      ]
+    },
+    "isComplete": { "type": "boolean" },
+    "verdict": { "enum": ["pass", "reject", "noChange", "incomplete"] },
+    "rejectionReasons": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "errors": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "verdict": { "enum": ["pass", "noChange"] } }, "required": ["verdict"] },
+      "then": {
+        "properties": {
+          "isComplete": { "const": true },
+          "rejectionReasons": { "maxItems": 0 },
+          "errors": { "maxItems": 0 },
+          "verification": {
+            "properties": { "restore": { "const": "passed" } },
+            "required": ["restore"]
+          },
+          "comparison": {
+            "properties": { "isComplete": { "const": true } },
+            "required": ["isComplete"]
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "verdict": { "const": "reject" } }, "required": ["verdict"] },
+      "then": {
+        "properties": {
+          "isComplete": { "const": true },
+          "rejectionReasons": { "minItems": 1 },
+          "errors": { "maxItems": 0 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "verdict": { "const": "incomplete" } }, "required": ["verdict"] },
+      "then": {
+        "properties": {
+          "isComplete": { "const": false },
+          "rejectionReasons": { "maxItems": 0 },
+          "errors": { "minItems": 1 }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "not": { "pattern": "^(?:[A-Za-z]:|/|\\\\)|(?:^|/)\\.\\.(?:/|$)" }
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "diagnosticChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "fingerprint"],
+      "properties": {
+        "kind": { "enum": ["added", "resolved", "severityChanged"] },
+        "fingerprint": { "type": "string", "minLength": 1 },
+        "before": { "$ref": "#/$defs/diffDiagnostic" },
+        "after": { "$ref": "#/$defs/diffDiagnostic" }
+      }
+    },
+    "diffDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "title", "explanation", "evidence", "suggestedAction"],
+      "properties": {
+        "code": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["information", "warning", "error"] },
+        "title": { "type": "string", "minLength": 1 },
+        "explanation": { "type": "string", "minLength": 1 },
+        "project": { "$ref": "#/$defs/portablePath" },
+        "file": { "$ref": "#/$defs/portablePath" },
+        "line": { "type": "integer", "minimum": 1 },
+        "evidence": { "type": "string" },
+        "suggestedAction": { "type": "string", "minLength": 1 },
+        "confidence": { "enum": ["low", "medium", "high"] },
+        "originalCode": { "type": "string", "minLength": 1 },
+        "packageId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "packageChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "changedAttributes"],
+      "properties": {
+        "kind": { "enum": ["added", "removed", "versionChanged", "dependencyKindChanged", "modified", "upgraded", "downgraded"] },
+        "before": { "$ref": "#/$defs/diffPackage" },
+        "after": { "$ref": "#/$defs/diffPackage" },
+        "changedAttributes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "enum": ["resolvedVersion", "requestedVersion", "versionSource", "dependencyKind", "packageSource", "contentHash", "signaturePresent"] }
+        }
+      }
+    },
+    "diffPackage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "framework", "id", "resolvedVersion", "dependencyKind", "versionSource"],
+      "properties": {
+        "project": { "$ref": "#/$defs/portablePath" },
+        "framework": { "type": "string", "minLength": 1 },
+        "id": { "type": "string", "minLength": 1 },
+        "resolvedVersion": { "type": "string", "minLength": 1 },
+        "dependencyKind": { "enum": ["direct", "transitive"] },
+        "requestedVersion": { "type": "string", "minLength": 1 },
+        "versionSource": { "type": "string", "minLength": 1 },
+        "runtimeIdentifier": { "type": "string", "minLength": 1 },
+        "packageSource": { "type": "string", "minLength": 1 },
+        "contentHash": { "type": "string", "minLength": 1 },
+        "signaturePresent": { "type": "boolean" }
+      }
+    },
+    "projectSettingsChange": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project"],
+      "properties": {
+        "kind": { "enum": ["added", "removed", "modified"] },
+        "project": { "$ref": "#/$defs/portablePath" },
+        "before": { "$ref": "#/$defs/projectSettings" },
+        "after": { "$ref": "#/$defs/projectSettings" }
+      }
+    },
+    "projectSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project", "managePackageVersionsCentrally", "centralPackageTransitivePinningEnabled",
+        "packageSourceCount", "packageSourceMappingEnabled", "restorePackagesWithLockFile",
+        "restoreLockedMode", "lockFileAvailable"
+      ],
+      "properties": {
+        "project": { "$ref": "#/$defs/portablePath" },
+        "managePackageVersionsCentrally": { "type": "boolean" },
+        "centralPackageTransitivePinningEnabled": { "type": "boolean" },
+        "packageSourceCount": { "type": "integer", "minimum": 0 },
+        "packageSourceMappingEnabled": { "type": "boolean" },
+        "restorePackagesWithLockFile": { "type": "boolean" },
+        "restoreLockedMode": { "type": "boolean" },
+        "lockFileAvailable": { "type": "boolean" }
+      }
+    },
+    "diagnosticSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["added", "resolved", "severityChanged"],
+      "properties": {
+        "added": { "type": "integer", "minimum": 0 },
+        "resolved": { "type": "integer", "minimum": 0 },
+        "severityChanged": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "packageSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "added", "removed", "upgraded", "downgraded", "uncomparableVersionChanges",
+        "directToTransitive", "transitiveToDirect", "otherModified"
+      ],
+      "properties": {
+        "added": { "type": "integer", "minimum": 0 },
+        "removed": { "type": "integer", "minimum": 0 },
+        "upgraded": { "type": "integer", "minimum": 0 },
+        "downgraded": { "type": "integer", "minimum": 0 },
+        "uncomparableVersionChanges": { "type": "integer", "minimum": 0 },
+        "directToTransitive": { "type": "integer", "minimum": 0 },
+        "transitiveToDirect": { "type": "integer", "minimum": 0 },
+        "otherModified": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "riskSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vulnerabilitiesIntroduced", "vulnerabilitiesResolved", "deprecationsIntroduced",
+        "deprecationsResolved", "vulnerabilitiesPersistent", "deprecationsPersistent"
+      ],
+      "properties": {
+        "vulnerabilitiesIntroduced": { "type": "integer", "minimum": 0 },
+        "vulnerabilitiesResolved": { "type": "integer", "minimum": 0 },
+        "deprecationsIntroduced": { "type": "integer", "minimum": 0 },
+        "deprecationsResolved": { "type": "integer", "minimum": 0 },
+        "vulnerabilitiesPersistent": { "type": "integer", "minimum": 0 },
+        "deprecationsPersistent": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "impact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "packages", "violations", "policy", "gatePassed"],
+      "properties": {
+        "summary": { "$ref": "#/$defs/impactSummary" },
+        "packages": { "type": "array", "items": { "$ref": "#/$defs/packageImpact" } },
+        "violations": { "type": "array", "items": { "$ref": "#/$defs/impactViolation" } },
+        "policy": { "$ref": "#/$defs/impactPolicy" },
+        "gatePassed": { "type": "boolean" }
+      }
+    },
+    "impactSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "changedPackages", "addedDirectPackages", "addedTransitivePackages", "removedPackages",
+        "upgrades", "downgrades", "directToTransitive", "transitiveToDirect", "sourceChanges",
+        "contentChanges", "maximumBlastRadius", "violations"
+      ],
+      "properties": {
+        "changedPackages": { "type": "integer", "minimum": 0 },
+        "addedDirectPackages": { "type": "integer", "minimum": 0 },
+        "addedTransitivePackages": { "type": "integer", "minimum": 0 },
+        "removedPackages": { "type": "integer", "minimum": 0 },
+        "upgrades": { "type": "integer", "minimum": 0 },
+        "downgrades": { "type": "integer", "minimum": 0 },
+        "directToTransitive": { "type": "integer", "minimum": 0 },
+        "transitiveToDirect": { "type": "integer", "minimum": 0 },
+        "sourceChanges": { "type": "integer", "minimum": 0 },
+        "contentChanges": { "type": "integer", "minimum": 0 },
+        "maximumBlastRadius": { "type": "integer", "minimum": 0 },
+        "violations": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "pathSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["packageId", "resolvedVersion"],
+      "properties": {
+        "packageId": { "type": "string", "minLength": 1 },
+        "resolvedVersion": { "type": "string", "minLength": 1 }
+      }
+    },
+    "packageImpact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "project", "framework", "packageId", "dependencyKind", "dependencyPath"],
+      "properties": {
+        "kind": { "enum": ["added", "removed", "versionChanged", "dependencyKindChanged", "modified", "upgraded", "downgraded"] },
+        "project": { "$ref": "#/$defs/portablePath" },
+        "framework": { "type": "string", "minLength": 1 },
+        "runtimeIdentifier": { "type": "string", "minLength": 1 },
+        "packageId": { "type": "string", "minLength": 1 },
+        "beforeVersion": { "type": "string", "minLength": 1 },
+        "afterVersion": { "type": "string", "minLength": 1 },
+        "dependencyKind": { "enum": ["direct", "transitive"] },
+        "rootPackageId": { "type": "string", "minLength": 1 },
+        "dependencyPath": { "type": "array", "items": { "$ref": "#/$defs/pathSegment" } },
+        "sourceBefore": { "type": "string", "minLength": 1 },
+        "sourceAfter": { "type": "string", "minLength": 1 },
+        "contentHashBefore": { "type": "string", "minLength": 1 },
+        "contentHashAfter": { "type": "string", "minLength": 1 },
+        "signaturePresent": { "type": "boolean" }
+      }
+    },
+    "impactViolation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "kind", "message", "suggestedAction"],
+      "properties": {
+        "code": { "type": "string", "pattern": "^PMI[0-9]{3}$" },
+        "kind": {
+          "enum": [
+            "packageDowngrade", "directToTransitive", "addedPackageBudgetExceeded",
+            "addedTransitiveBudgetExceeded", "packageSourceChanged", "packageSourceNotAllowed",
+            "packageSourceUnknown", "packageContentChanged", "packageSourceMappingRequired",
+            "lockedModeRequired"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1 },
+        "suggestedAction": { "type": "string", "minLength": 1 },
+        "project": { "$ref": "#/$defs/portablePath" },
+        "framework": { "type": "string", "minLength": 1 },
+        "packageId": { "type": "string", "minLength": 1 },
+        "rootPackageId": { "type": "string", "minLength": 1 },
+        "dependencyPath": { "type": "array", "items": { "$ref": "#/$defs/pathSegment" } }
+      }
+    },
+    "impactPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "failOnDowngrade", "failOnDirectToTransitive", "failOnSourceChange",
+        "failOnContentChange", "requirePackageSourceMapping", "requireLockedMode", "allowedSources"
+      ],
+      "properties": {
+        "failOnDowngrade": { "type": "boolean" },
+        "failOnDirectToTransitive": { "type": "boolean" },
+        "maxAddedPackages": { "type": "integer", "minimum": 0 },
+        "maxAddedTransitivePackages": { "type": "integer", "minimum": 0 },
+        "failOnSourceChange": { "type": "boolean" },
+        "failOnContentChange": { "type": "boolean" },
+        "requirePackageSourceMapping": { "type": "boolean" },
+        "requireLockedMode": { "type": "boolean" },
+        "allowedSources": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    }
+  }
+}

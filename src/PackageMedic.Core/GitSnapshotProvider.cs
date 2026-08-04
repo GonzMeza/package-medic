@@ -10,6 +10,7 @@ namespace PackageMedic.Core;
 public sealed class GitSnapshot : IDisposable
 {
     private readonly string ownedDirectory;
+    private readonly string ownershipToken;
     private int disposed;
 
     internal GitSnapshot(
@@ -17,13 +18,15 @@ public sealed class GitSnapshot : IDisposable
         string reference,
         string commit,
         string snapshotDirectory,
-        string ownedDirectory)
+        string ownedDirectory,
+        string ownershipToken)
     {
         RepositoryRoot = repositoryRoot;
         Reference = reference;
         Commit = commit;
         SnapshotDirectory = snapshotDirectory;
         this.ownedDirectory = ownedDirectory;
+        this.ownershipToken = ownershipToken;
     }
 
     public string RepositoryRoot { get; }
@@ -41,7 +44,7 @@ public sealed class GitSnapshot : IDisposable
             return;
         }
 
-        GitSnapshotProvider.DeleteOwnedDirectory(ownedDirectory);
+        GitSnapshotProvider.DeleteOwnedDirectory(ownedDirectory, ownershipToken);
     }
 }
 
@@ -84,6 +87,8 @@ public sealed record GitSnapshotLimits(
 public sealed class GitSnapshotProvider
 {
     private const string TemporaryDirectoryPrefix = "PackageMedic.GitSnapshot.";
+    internal const string OwnershipMarkerFileName = ".packagemedic-snapshot-owner";
+    private const string OwnershipMarkerPrefix = "PackageMedic.GitSnapshot:v1:";
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
 
     private readonly IProcessRunner processRunner;
@@ -174,14 +179,16 @@ public sealed class GitSnapshotProvider
         var ownedDirectory = Path.Combine(
             temporaryRoot,
             TemporaryDirectoryPrefix + Guid.NewGuid().ToString("N"));
+        var ownershipToken = Guid.NewGuid().ToString("N");
         var archivePath = Path.Combine(ownedDirectory, "snapshot.tar");
         var snapshotDirectory = Path.Combine(ownedDirectory, "worktree");
-        Directory.CreateDirectory(snapshotDirectory);
 
         try
         {
+            CreateOwnedDirectory(ownedDirectory, ownershipToken);
+            Directory.CreateDirectory(snapshotDirectory);
             await RunGitAsync(
-                ["archive", "--format=tar", $"--output={archivePath}", commit],
+                ["-c", "core.attributesFile=", "archive", "--format=tar", $"--output={archivePath}", commit],
                 repositoryRoot,
                 $"archive Git commit '{commit}'",
                 cancellationToken).ConfigureAwait(false);
@@ -216,11 +223,23 @@ public sealed class GitSnapshotProvider
                 reference,
                 commit,
                 snapshotDirectory,
-                ownedDirectory);
+                ownedDirectory,
+                ownershipToken);
         }
-        catch
+        catch (Exception operationError)
         {
-            DeleteOwnedDirectory(ownedDirectory);
+            try
+            {
+                DeleteOwnedDirectory(ownedDirectory, ownershipToken);
+            }
+            catch (Exception cleanupError)
+            {
+                throw new AggregateException(
+                    "Git snapshot materialization failed and its owned temporary directory could not be cleaned up.",
+                    operationError,
+                    cleanupError);
+            }
+
             throw;
         }
     }
@@ -337,6 +356,11 @@ public sealed class GitSnapshotProvider
                         }
                     }
 
+                    if (!OperatingSystem.IsWindows())
+                    {
+                        File.SetUnixFileMode(destination, entry.Mode);
+                    }
+
                     break;
 
                 case TarEntryType.SymbolicLink:
@@ -427,31 +451,193 @@ public sealed class GitSnapshotProvider
                stem[3] is >= '1' and <= '9';
     }
 
-    internal static void DeleteOwnedDirectory(string directory)
+    private static void CreateOwnedDirectory(string directory, string ownershipToken)
     {
-        if (!Directory.Exists(directory))
+        Directory.CreateDirectory(directory);
+        if (File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint))
         {
-            return;
+            throw new InvalidOperationException("The owned Git snapshot directory cannot be a symbolic link or junction.");
         }
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                directory,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        var markerPath = Path.Combine(directory, OwnershipMarkerFileName);
+        var markerCreated = false;
+        try
+        {
+            using var marker = new FileStream(markerPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            markerCreated = true;
+            using var writer = new StreamWriter(marker, new UTF8Encoding(false));
+            writer.Write(OwnershipMarkerPrefix);
+            writer.Write(ownershipToken);
+        }
+        catch
+        {
+            if (markerCreated)
+            {
+                try
+                {
+                    File.Delete(markerPath);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    // Preserve the marker-creation exception.
+                }
+            }
 
-        var name = Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory)));
-        if (!name.StartsWith(TemporaryDirectoryPrefix, StringComparison.Ordinal))
+            try
+            {
+                // Never recurse before ownership has been established. If another entry appeared,
+                // leave the directory behind instead of risking deletion outside our boundary.
+                Directory.Delete(directory, recursive: false);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+            {
+                // Preserve the marker-creation exception; a leftover temporary directory is safer.
+            }
+
+            throw;
+        }
+    }
+
+    internal static void DeleteOwnedDirectory(string directory, string ownershipToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
+        ArgumentException.ThrowIfNullOrWhiteSpace(ownershipToken);
+
+        var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(directory));
+        var name = Path.GetFileName(fullPath);
+        var suffix = name.StartsWith(TemporaryDirectoryPrefix, StringComparison.Ordinal)
+            ? name[TemporaryDirectoryPrefix.Length..]
+            : string.Empty;
+        if (!Guid.TryParseExact(suffix, "N", out _))
         {
             throw new InvalidOperationException("Refusing to delete a directory not owned by PackageMedic.");
         }
 
-        try
+        if (!Directory.Exists(fullPath))
         {
-            Directory.Delete(directory, recursive: true);
+            return;
         }
-        catch (UnauthorizedAccessException)
+
+        var rootAttributes = File.GetAttributes(fullPath);
+        if (rootAttributes.HasFlag(FileAttributes.ReparsePoint))
         {
-            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            throw new InvalidOperationException("Refusing to delete a PackageMedic snapshot root that is a symbolic link or junction.");
+        }
+
+        var markerPath = Path.Combine(fullPath, OwnershipMarkerFileName);
+        if (!File.Exists(markerPath))
+        {
+            throw new InvalidOperationException("Refusing to delete a PackageMedic snapshot without its ownership marker.");
+        }
+
+        var markerAttributes = File.GetAttributes(markerPath);
+        if (markerAttributes.HasFlag(FileAttributes.Directory) ||
+            markerAttributes.HasFlag(FileAttributes.ReparsePoint))
+        {
+            throw new InvalidOperationException("Refusing to trust an invalid PackageMedic snapshot ownership marker.");
+        }
+
+        var expectedMarker = OwnershipMarkerPrefix + ownershipToken;
+        var markerInfo = new FileInfo(markerPath);
+        if (markerInfo.Length != Encoding.UTF8.GetByteCount(expectedMarker) ||
+            !string.Equals(File.ReadAllText(markerPath, Encoding.UTF8), expectedMarker, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Refusing to delete a PackageMedic snapshot with an invalid ownership marker.");
+        }
+
+        DeleteDirectoryWithoutFollowingLinks(fullPath);
+    }
+
+    private static void DeleteDirectoryWithoutFollowingLinks(string directory)
+    {
+        var options = new EnumerationOptions
+        {
+            AttributesToSkip = 0,
+            IgnoreInaccessible = false,
+            RecurseSubdirectories = false,
+            ReturnSpecialDirectories = false,
+        };
+
+        var pending = new Stack<(string Path, bool DeleteAfterChildren)>();
+        pending.Push((directory, false));
+        while (pending.TryPop(out var current))
+        {
+            var attributes = File.GetAttributes(current.Path);
+            if (attributes.HasFlag(FileAttributes.ReparsePoint))
             {
-                File.SetAttributes(file, FileAttributes.Normal);
+                if (string.Equals(
+                        Path.GetFullPath(current.Path),
+                        Path.GetFullPath(directory),
+                        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "Refusing to delete a PackageMedic snapshot root that became a symbolic link or junction.");
+                }
+
+                if (attributes.HasFlag(FileAttributes.Directory))
+                {
+                    Directory.Delete(current.Path, recursive: false);
+                }
+                else
+                {
+                    File.Delete(current.Path);
+                }
+
+                continue;
             }
 
-            Directory.Delete(directory, recursive: true);
+            if (!attributes.HasFlag(FileAttributes.Directory))
+            {
+                ClearReadOnly(current.Path, attributes);
+                File.Delete(current.Path);
+                continue;
+            }
+
+            if (current.DeleteAfterChildren)
+            {
+                ClearReadOnly(current.Path, attributes);
+                Directory.Delete(current.Path, recursive: false);
+                continue;
+            }
+
+            pending.Push((current.Path, true));
+            foreach (var entry in Directory.EnumerateFileSystemEntries(current.Path, "*", options))
+            {
+                var entryAttributes = File.GetAttributes(entry);
+                if (entryAttributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    if (entryAttributes.HasFlag(FileAttributes.Directory))
+                    {
+                        Directory.Delete(entry, recursive: false);
+                    }
+                    else
+                    {
+                        File.Delete(entry);
+                    }
+                }
+                else if (entryAttributes.HasFlag(FileAttributes.Directory))
+                {
+                    pending.Push((entry, false));
+                }
+                else
+                {
+                    ClearReadOnly(entry, entryAttributes);
+                    File.Delete(entry);
+                }
+            }
+        }
+    }
+
+    private static void ClearReadOnly(string path, FileAttributes attributes)
+    {
+        if (attributes.HasFlag(FileAttributes.ReadOnly))
+        {
+            File.SetAttributes(path, attributes & ~FileAttributes.ReadOnly);
         }
     }
 

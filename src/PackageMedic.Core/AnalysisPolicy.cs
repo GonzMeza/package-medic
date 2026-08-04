@@ -37,6 +37,7 @@ public sealed class AnalysisPolicy
         IReadOnlyList<string> exclude,
         IReadOnlyDictionary<string, PolicyRule> rules,
         IReadOnlyList<PolicySuppression> suppressions,
+        ConfiguredImpactPolicy impact,
         PolicyTimeouts timeouts)
     {
         FailOn = failOn;
@@ -45,6 +46,7 @@ public sealed class AnalysisPolicy
         Exclude = exclude;
         Rules = rules;
         Suppressions = suppressions;
+        Impact = impact;
         Timeouts = timeouts;
         excludeMatchers = exclude.Select(GlobMatcher.Create).ToArray();
         suppressionsByRule = suppressions
@@ -69,6 +71,8 @@ public sealed class AnalysisPolicy
     public IReadOnlyDictionary<string, PolicyRule> Rules { get; }
 
     public IReadOnlyList<PolicySuppression> Suppressions { get; }
+
+    public ConfiguredImpactPolicy Impact { get; }
 
     public PolicyTimeouts Timeouts { get; }
 
@@ -148,6 +152,11 @@ public sealed class AnalysisPolicy
 
     private static bool ContainsPackageIdentifier(Diagnostic diagnostic, string package)
     {
+        if (!string.IsNullOrWhiteSpace(diagnostic.PackageId))
+        {
+            return diagnostic.PackageId.Equals(package, StringComparison.OrdinalIgnoreCase);
+        }
+
         var searchable = string.Join(
             '\n',
             diagnostic.Title,
@@ -291,6 +300,7 @@ public static class AnalysisPolicyResolver
             configuration.Exclude,
             configuration.Rules,
             configuration.Suppressions,
+            configuration.Impact,
             new PolicyTimeouts(TimeSpan.FromSeconds(restoreSeconds), TimeSpan.FromSeconds(evaluationSeconds)));
     }
 

@@ -21,7 +21,7 @@ export const metadata: Metadata = {
   metadataBase: new URL("https://gonzmeza.github.io/package-medic/"),
   title: "PackageMedic — A dependency doctor for .NET projects",
   description:
-    "Inventory, audit, and compare NuGet dependency graphs through text, JSON, SARIF, and GitHub annotations.",
+    "Trace NuGet dependency impact, blast radius, source trust, and risk changes through text, JSON, SARIF, and GitHub pull-request checks.",
   icons: {
     icon: `${pagesBasePath}/packagemedic-icon.png`,
     shortcut: `${pagesBasePath}/packagemedic-icon.png`,
@@ -30,14 +30,14 @@ export const metadata: Metadata = {
     type: "website",
     title: "PackageMedic — A dependency doctor for .NET projects",
     description:
-      "Read-only NuGet inventory, vulnerability audit, Git-reference diff, and deterministic SARIF.",
+      "Read-only NuGet Impact Gate, causal dependency paths, vulnerability and deprecation audit, and deterministic SARIF.",
     images: [{ url: `${siteUrl}og.png`, width: 1280, height: 640, alt: "PackageMedic" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "PackageMedic — A dependency doctor for .NET projects",
     description:
-      "Read-only NuGet inventory, vulnerability audit, Git-reference diff, and deterministic SARIF.",
+      "Read-only NuGet Impact Gate, causal dependency paths, vulnerability and deprecation audit, and deterministic SARIF.",
     images: [`${siteUrl}og.png`],
   },
 };

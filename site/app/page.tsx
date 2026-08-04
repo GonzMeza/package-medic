@@ -60,6 +60,12 @@ const diagnostics = [
     copy: "Turn official NuGet audit evidence into package, framework, advisory, and dependency-kind diagnostics.",
     tone: "mint",
   },
+  {
+    code: "PM008",
+    title: "Deprecated packages",
+    copy: "Preserve NuGet deprecation reasons and replacement guidance with direct/transitive context.",
+    tone: "cyan",
+  },
 ];
 
 export default function Home() {
@@ -80,6 +86,7 @@ export default function Home() {
         </a>
         <div className="nav-links">
           <Link href="/docs">Docs</Link>
+          <a href="#impact">Impact Gate</a>
           <a href="#diagnostics">Diagnostics</a>
           <a href="#workflow">How it works</a>
           <a href="#policy">Policy</a>
@@ -110,7 +117,9 @@ export default function Home() {
           <p className="hero-lede">
             PackageMedic scans SDK-style .NET projects for dependency drift,
             stale central versions, CPM bypasses, floating versions,
-            vulnerabilities, and Git graph changes—then explains what to review.
+            vulnerabilities, deprecations, and PR graph changes—then traces every
+            changed transitive to the direct package that caused it and can simulate one exact
+            package candidate without editing your checkout.
           </p>
 
           <div className="install-box" aria-label="Install PackageMedic">
@@ -139,7 +148,7 @@ export default function Home() {
           </div>
 
           <ul className="hero-trust" aria-label="Key product traits">
-            <li><span aria-hidden="true">◆</span> Read-only</li>
+            <li><span aria-hidden="true">◆</span> Checkout-safe</li>
             <li><span aria-hidden="true">◆</span> No telemetry</li>
             <li><span aria-hidden="true">◆</span> Baseline-aware</li>
           </ul>
@@ -208,7 +217,7 @@ export default function Home() {
         <div className="section-heading">
           <div>
             <span className="section-kicker">Diagnostic matrix</span>
-            <h2>Seven checks. One clearer graph.</h2>
+            <h2>Eight checks. One clearer graph.</h2>
           </div>
           <p>
             Each finding includes evidence, project context, source location
@@ -247,7 +256,7 @@ export default function Home() {
             <li><span>03</span><div><strong>Resolve</strong><small>Direct and transitive packages from project.assets.json.</small></div></li>
             <li><span>04</span><div><strong>Diagnose</strong><small>Text, deterministic JSON, or SARIF with exit codes.</small></div></li>
             <li><span>05</span><div><strong>Classify</strong><small>New, existing, and resolved against a portable baseline.</small></div></li>
-            <li><span>06</span><div><strong>Compare</strong><small>Audit vulnerabilities or diff the graph against a Git ref.</small></div></li>
+            <li><span>06</span><div><strong>Compare</strong><small>Audit risks or classify PR graph changes automatically.</small></div></li>
           </ol>
         </div>
 
@@ -271,6 +280,120 @@ export default function Home() {
             <p><span className="summary-ok">0 errors</span> · <span className="summary-warn">1 warning</span> · 0 informational</p>
             <span className="terminal-cursor" aria-hidden="true" />
           </div>
+        </div>
+      </section>
+
+      <section className="section policy-section" id="impact">
+        <div className="section-heading">
+          <div>
+            <span className="section-kicker">Dependency Impact Gate</span>
+            <h2>See what an update brings with it.</h2>
+          </div>
+          <p>
+            Replace a flat package diff with causal paths, dependency growth,
+            source trust, and one reviewable gate for the pull request.
+          </p>
+        </div>
+        <div className="ci-grid">
+          <div className="terminal-window ci-terminal" aria-label="Dependency Impact Gate example">
+            <div className="terminal-bar">
+              <span /><span /><span />
+              <small>package-medic diff origin/main .</small>
+            </div>
+            <div className="terminal-body">
+              <p><span className="summary-warn">PMI004</span> Added transitive budget exceeded</p>
+              <p className="muted">Contoso.Web 4.0.0 → Contoso.Transport 3.2.0 → Contoso.Json 2.1.0</p>
+              <div className="terminal-rule" />
+              <p>Added direct: <b>1</b> · Added transitive: <b>7</b></p>
+              <p>Blast radius: <b>7</b> · Source/content changes: <b>0/0</b></p>
+              <p className="warning"><strong>Impact Gate failed</strong> · 1 policy violation</p>
+            </div>
+          </div>
+          <div className="ci-features">
+            <article>
+              <span>01</span>
+              <strong>Causal dependency paths</strong>
+              <p>Trace a changed transitive back to the direct package responsible for it.</p>
+            </article>
+            <article>
+              <span>02</span>
+              <strong>Blast radius</strong>
+              <p>Measure how many resolved changes one direct dependency introduced.</p>
+            </article>
+            <article>
+              <span>03</span>
+              <strong>Source trust</strong>
+              <p>Gate source changes, SHA-512 content drift, allowlists, mapping, and unknown provenance.</p>
+            </article>
+            <article>
+              <span>04</span>
+              <strong>Reproducible restore</strong>
+              <p>Require committed lock files and locked mode where repository policy demands it.</p>
+            </article>
+          </div>
+        </div>
+        <div className="hero-actions">
+          <Link className="button secondary" href="/docs/impact-gate">
+            Explore the Impact Gate <span aria-hidden="true">→</span>
+          </Link>
+        </div>
+      </section>
+
+      <section className="section policy-section" id="time-machine">
+        <div className="section-heading">
+          <div>
+            <span className="section-kicker">Dependency Time Machine</span>
+            <h2>See the resolved graph before editing the package.</h2>
+          </div>
+          <p>
+            Test one exact direct dependency candidate against restore, diagnostics, risk evidence,
+            and the Impact Gate in two independent snapshots of the same commit.
+          </p>
+        </div>
+        <div className="ci-grid">
+          <div className="terminal-window ci-terminal" aria-label="Dependency Time Machine example">
+            <div className="terminal-bar">
+              <span /><span /><span />
+              <small>restore-only simulation</small>
+            </div>
+            <div className="terminal-body">
+              <p><i>›</i> package-medic simulate Example.Package --to 2.0.0 .</p>
+              <p className="muted">Baseline HEAD restored in snapshot A</p>
+              <p className="muted">Candidate 2.0.0 restored in snapshot B</p>
+              <div className="terminal-rule" />
+              <p>Resolved candidate: <b>2.0.0</b></p>
+              <p>Added transitives: <b>2</b> · Removed transitives: <b>1</b></p>
+              <p><span className="summary-ok">PASS</span> · restore + graph evidence</p>
+              <p className="muted">Build not run · tests not run · runtime not verified</p>
+            </div>
+          </div>
+          <div className="ci-features">
+            <article>
+              <span>01</span>
+              <strong>Two independent snapshots</strong>
+              <p>Baseline and candidate start from the same immutable clean commit with separate caches.</p>
+            </article>
+            <article>
+              <span>02</span>
+              <strong>Byte-preserving edit</strong>
+              <p>Only the validated version value changes; encoding, comments, whitespace, and quotes stay intact.</p>
+            </article>
+            <article>
+              <span>03</span>
+              <strong>Fail-closed verdicts</strong>
+              <p>Distinguish a complete rejection from an incomplete operational result.</p>
+            </article>
+            <article>
+              <span>04</span>
+              <strong>Honest evidence boundary</strong>
+              <p>A pass proves observed restore and graph policy—not build, tests, runtime, or package safety.</p>
+            </article>
+          </div>
+        </div>
+        <div className="hero-actions">
+          <Link className="button secondary" href="/docs/time-machine">
+            Explore Dependency Time Machine <span aria-hidden="true">→</span>
+          </Link>
         </div>
       </section>
 
@@ -321,7 +444,7 @@ export default function Home() {
             <article>
               <span>04</span>
               <strong>Read-only cleanup</strong>
-              <p>clean --dry-run previews high-confidence candidates; 0.4 has no apply path.</p>
+              <p>clean --dry-run previews high-confidence candidates; 0.5 has no apply path.</p>
             </article>
           </div>
         </div>
@@ -349,8 +472,8 @@ export default function Home() {
               <p className="muted">Wrote json report to reports/medic.json</p>
               <p className="muted">Wrote sarif report to reports/medic.sarif</p>
               <div className="terminal-rule" />
-              <p><span className="summary-ok">PM001–PM007 mapped</span></p>
-              <p className="muted">Portable inventory · vulnerabilities · Git graph changes</p>
+              <p><span className="summary-ok">PM001–PM008 mapped</span></p>
+              <p className="muted">Inventory · risk deltas · semantic PR graph changes</p>
             </div>
           </div>
           <div className="ci-features">
@@ -366,13 +489,13 @@ export default function Home() {
             </article>
             <article>
               <span>03</span>
-              <strong>Official NuGet audit</strong>
-              <p>Opt into direct or transitive advisory evidence without a custom HTTP client.</p>
+              <strong>Official NuGet evidence</strong>
+              <p>Opt into vulnerability and deprecation data without a custom HTTP client.</p>
             </article>
             <article>
               <span>04</span>
-              <strong>Git-reference diffs</strong>
-              <p>Compare findings, package versions, dependency kind, and CPM settings without switching branches.</p>
+              <strong>PR-aware diffs</strong>
+              <p>Classify upgrades, downgrades, dependency-kind and PM007/PM008 risk changes without switching branches.</p>
             </article>
           </div>
         </div>
@@ -389,11 +512,12 @@ export default function Home() {
           <span className="section-kicker">Safe by design</span>
           <h2>Diagnosis without surprise edits.</h2>
           <p>
-            PackageMedic remains intentionally read-only. It does not apply
-            fixes, rewrite project files, or collect telemetry.
+            PackageMedic leaves your checkout untouched. It does not apply
+            fixes, rewrite dependency files in place, or collect telemetry. Time Machine changes
+            only an owned disposable snapshot.
           </p>
           <div className="safety-grid">
-            <div><span>01</span><strong>No automatic mutations</strong></div>
+            <div><span>01</span><strong>No checkout mutations</strong></div>
             <div><span>02</span><strong>No telemetry collection</strong></div>
             <div><span>03</span><strong>No private feed credentials printed</strong></div>
             <div><span>04</span><strong>Restore can be explicitly skipped</strong></div>

@@ -51,15 +51,54 @@ public sealed class PackageMedicAnalyzer
         bool noRestore,
         Action<string>? progress = null,
         CancellationToken cancellationToken = default,
-        string? containmentRoot = null)
+        string? containmentRoot = null,
+        bool forceEvaluateRestore = false,
+        string? packagesDirectory = null,
+        RestoreExecutionResult? preparedRestore = null)
     {
         var discovered = discovery.Discover(requestedPath, containmentRoot);
+        return await AnalyzeAsync(
+            discovered,
+            noRestore,
+            progress,
+            cancellationToken,
+            containmentRoot,
+            forceEvaluateRestore,
+            packagesDirectory,
+            preparedRestore).ConfigureAwait(false);
+    }
+
+    public async Task<AnalysisOutcome> AnalyzeAsync(
+        DiscoveryResult discovered,
+        bool noRestore,
+        Action<string>? progress = null,
+        CancellationToken cancellationToken = default,
+        string? containmentRoot = null,
+        bool forceEvaluateRestore = false,
+        string? packagesDirectory = null,
+        RestoreExecutionResult? preparedRestore = null)
+    {
+        ArgumentNullException.ThrowIfNull(discovered);
+        var trustedRoot = Path.GetFullPath(containmentRoot ??
+            (Directory.Exists(discovered.Target)
+                ? discovered.Target
+                : Path.GetDirectoryName(discovered.Target)!));
         var initialDiagnostics = new List<Diagnostic>();
         var analysisErrors = new List<string>(discovered.Errors);
 
-        if (!noRestore)
+        if (preparedRestore is not null)
         {
-            var restore = await restoreRunner.RestoreAsync(discovered, progress, cancellationToken).ConfigureAwait(false);
+            initialDiagnostics.AddRange(preparedRestore.Diagnostics);
+            analysisErrors.AddRange(preparedRestore.Errors);
+        }
+        else if (!noRestore)
+        {
+            var restore = await restoreRunner.RestoreAsync(
+                discovered,
+                progress,
+                cancellationToken,
+                forceEvaluateRestore,
+                packagesDirectory).ConfigureAwait(false);
             initialDiagnostics.AddRange(restore.Diagnostics);
             analysisErrors.AddRange(restore.Errors);
         }
@@ -85,6 +124,8 @@ public sealed class PackageMedicAnalyzer
                     lineLocator,
                     progress,
                     progressGate,
+                    trustedRoot,
+                    packagesDirectory,
                     token).ConfigureAwait(false);
             }).ConfigureAwait(false);
         var projects = evaluatedProjects
@@ -124,14 +165,30 @@ public sealed class PackageMedicAnalyzer
                 .Select(project => new ProjectPackageSettings(
                     project.ProjectPath,
                     project.ManagePackageVersionsCentrally,
-                    project.CentralPackageTransitivePinningEnabled))
+                    project.CentralPackageTransitivePinningEnabled)
+                {
+                    PackageSourceCount = project.PackageSourceCount,
+                    PackageSourceMappingEnabled = project.PackageSourceMappingEnabled,
+                    RestorePackagesWithLockFile = project.RestorePackagesWithLockFile,
+                    RestoreLockedMode = project.RestoreLockedMode,
+                    LockFileAvailable = project.LockFileAvailable,
+                })
                 .OrderBy(item => item.Project, StringComparer.OrdinalIgnoreCase)
+                .ToArray(),
+            DependencyPaths = projects
+                .SelectMany(project => project.DependencyPaths)
+                .OrderBy(item => item.Project, OperatingSystem.IsWindows()
+                    ? StringComparer.OrdinalIgnoreCase
+                    : StringComparer.Ordinal)
+                .ThenBy(item => item.Framework, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(item => item.RuntimeIdentifier, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(item => item.PackageId, StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
         };
         return new AnalysisOutcome(result, analysisErrors.Count > 0);
     }
 
-    private static IReadOnlyList<PackageInventoryItem> EnrichPackageInventory(
+    internal static IReadOnlyList<PackageInventoryItem> EnrichPackageInventory(
         IReadOnlyList<PackageInventoryItem> inventory,
         EvaluatedProject project)
     {
@@ -148,26 +205,53 @@ public sealed class PackageMedicAnalyzer
                 return item;
             }
 
-            var direct = directById.GetValueOrDefault(item.Id)?.FirstOrDefault(reference =>
-                reference.TargetFramework is null || FrameworkMatches(reference.TargetFramework, item.Framework));
-            var central = centralById.GetValueOrDefault(item.Id)?.FirstOrDefault(version =>
-                version.TargetFramework is null || FrameworkMatches(version.TargetFramework, item.Framework));
+            var direct = SelectFrameworkScopedItem(
+                directById.GetValueOrDefault(item.Id),
+                item.Framework,
+                reference => reference.TargetFramework);
+            var central = SelectFrameworkScopedItem(
+                centralById.GetValueOrDefault(item.Id),
+                item.Framework,
+                version => version.TargetFramework);
             if (!string.IsNullOrWhiteSpace(direct?.VersionOverride))
             {
-                return item with { RequestedVersion = direct.VersionOverride, VersionSource = "override" };
+                return item with
+                {
+                    RequestedVersion = direct.VersionOverride,
+                    VersionSource = "override",
+                    SourceFile = direct.SourceFile,
+                    SourceLine = direct.Line,
+                };
             }
 
             if (!string.IsNullOrWhiteSpace(direct?.Version))
             {
-                return item with { RequestedVersion = direct.Version, VersionSource = "project" };
+                return item with
+                {
+                    RequestedVersion = direct.Version,
+                    VersionSource = "project",
+                    SourceFile = direct.SourceFile,
+                    SourceLine = direct.Line,
+                };
             }
 
             if (!string.IsNullOrWhiteSpace(central?.Version))
             {
-                return item with { RequestedVersion = central.Version, VersionSource = "central" };
+                return item with
+                {
+                    RequestedVersion = central.Version,
+                    VersionSource = "central",
+                    SourceFile = central.SourceFile,
+                    SourceLine = central.Line,
+                };
             }
 
-            return item with { VersionSource = "implicit" };
+            return item with
+            {
+                VersionSource = "implicit",
+                SourceFile = direct?.SourceFile,
+                SourceLine = direct?.Line,
+            };
         }).ToArray();
     }
 
@@ -176,6 +260,8 @@ public sealed class PackageMedicAnalyzer
         XmlItemLineLocator lineLocator,
         Action<string>? progress,
         object progressGate,
+        string trustedRoot,
+        string? trustedPackagesDirectory,
         CancellationToken cancellationToken)
     {
         lock (progressGate)
@@ -186,7 +272,12 @@ public sealed class PackageMedicAnalyzer
         try
         {
             var evaluated = await evaluator.EvaluateAsync(projectPath, lineLocator, cancellationToken).ConfigureAwait(false);
-            var assets = assetsReader.Read(evaluated.AssetsFile, projectPath);
+            var assets = assetsReader.Read(
+                evaluated.AssetsFile,
+                projectPath,
+                trustedRoot,
+                trustedPackagesDirectory);
+            var inventory = EnrichPackageInventory(assets.PackageInventory, evaluated);
             return new ProjectEvaluationOutcome(new ProjectAnalysis
             {
                 ProjectPath = evaluated.ProjectPath,
@@ -197,7 +288,13 @@ public sealed class PackageMedicAnalyzer
                 CentralVersions = evaluated.CentralVersions,
                 ResolvedPackages = assets.ResolvedPackages,
                 TransitivePackages = assets.TransitivePackages,
-                PackageInventory = EnrichPackageInventory(assets.PackageInventory, evaluated),
+                PackageInventory = inventory,
+                DependencyPaths = DependencyGraphBuilder.BuildPaths(inventory, assets.DependencyEdges),
+                PackageSourceCount = assets.PackageSourceCount,
+                PackageSourceMappingEnabled = assets.PackageSourceMappingEnabled,
+                RestorePackagesWithLockFile = evaluated.RestorePackagesWithLockFile,
+                RestoreLockedMode = evaluated.RestoreLockedMode,
+                LockFileAvailable = NuGetLockFileValidator.IsTrustedAndValid(evaluated.LockFilePath, trustedRoot),
                 AssetDiagnostics = assets.Diagnostics,
             }, null);
         }
@@ -207,9 +304,71 @@ public sealed class PackageMedicAnalyzer
         }
     }
 
-    private static bool FrameworkMatches(string evaluatedFramework, string assetsFramework) =>
-        evaluatedFramework.Equals(assetsFramework, StringComparison.OrdinalIgnoreCase) ||
-        assetsFramework.Contains(evaluatedFramework, StringComparison.OrdinalIgnoreCase);
+    private static T? SelectFrameworkScopedItem<T>(
+        IReadOnlyList<T>? candidates,
+        string assetsFramework,
+        Func<T, string?> frameworkSelector)
+        where T : class
+    {
+        if (candidates is null || candidates.Count == 0)
+        {
+            return null;
+        }
+
+        var exact = candidates
+            .Where(candidate => string.Equals(
+                frameworkSelector(candidate)?.Trim(),
+                assetsFramework.Trim(),
+                StringComparison.OrdinalIgnoreCase))
+            .Take(2)
+            .ToArray();
+        if (exact.Length != 0)
+        {
+            return exact.Length == 1 ? exact[0] : null;
+        }
+
+        var normalizedAssetsFramework = NormalizeFrameworkScope(assetsFramework);
+        var normalized = candidates
+            .Where(candidate => frameworkSelector(candidate) is { } framework &&
+                NormalizeFrameworkScope(framework).Equals(normalizedAssetsFramework, StringComparison.OrdinalIgnoreCase))
+            .Take(2)
+            .ToArray();
+        if (normalized.Length != 0)
+        {
+            return normalized.Length == 1 ? normalized[0] : null;
+        }
+
+        var unscoped = candidates
+            .Where(candidate => string.IsNullOrWhiteSpace(frameworkSelector(candidate)))
+            .Take(2)
+            .ToArray();
+        return unscoped.Length == 1 ? unscoped[0] : null;
+    }
+
+    internal static string NormalizeFrameworkScope(string framework)
+    {
+        var normalized = framework.Trim().Split('/', 2)[0].ToLowerInvariant();
+        var platformSeparator = normalized.IndexOf('-');
+        if (platformSeparator < 0 || platformSeparator == normalized.Length - 1)
+        {
+            return normalized;
+        }
+
+        var platform = normalized[(platformSeparator + 1)..];
+        var platformVersionStart = -1;
+        for (var index = 0; index < platform.Length; index++)
+        {
+            if (char.IsAsciiDigit(platform[index]))
+            {
+                platformVersionStart = index;
+                break;
+            }
+        }
+
+        return platformVersionStart > 0
+            ? $"{normalized[..(platformSeparator + 1)]}{platform[..platformVersionStart]}"
+            : normalized;
+    }
 
     private sealed record ProjectEvaluationOutcome(ProjectAnalysis? Project, string? Error);
 }

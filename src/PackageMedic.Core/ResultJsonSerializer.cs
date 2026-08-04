@@ -89,6 +89,7 @@ public static class ResultJsonSerializer
                 : result.Packages.Select(item => item with
                 {
                     Project = ToPortablePath(item.Project, context.RepositoryRoot) ?? Path.GetFileName(item.Project),
+                    SourceFile = ToPortablePath(item.SourceFile, context.RepositoryRoot),
                 }),
             Options);
         writer.WritePropertyName("projectSettings");
@@ -111,6 +112,26 @@ public static class ResultJsonSerializer
                     Project = ToPortablePath(item.Project, context.RepositoryRoot) ?? Path.GetFileName(item.Project),
                 }),
             Options);
+        writer.WritePropertyName("dependencyPaths");
+        JsonSerializer.Serialize(
+            writer,
+            context is null
+                ? result.DependencyPaths
+                : result.DependencyPaths.Select(item => item with
+                {
+                    Project = ToPortablePath(item.Project, context.RepositoryRoot) ?? Path.GetFileName(item.Project),
+                }),
+            Options);
+        writer.WritePropertyName("deprecatedPackages");
+        JsonSerializer.Serialize(
+            writer,
+            context is null
+                ? result.DeprecatedPackages
+                : result.DeprecatedPackages.Select(item => item with
+                {
+                    Project = ToPortablePath(item.Project, context.RepositoryRoot) ?? Path.GetFileName(item.Project),
+                }),
+            Options);
         writer.WriteNumber("schemaVersion", AnalysisReportContext.ReportSchemaVersion);
 
         if (context is not null)
@@ -121,6 +142,7 @@ public static class ResultJsonSerializer
                 configurationFile = context.ConfigurationFile,
                 failOn = context.Policy.FailOn,
                 failOnNew = context.Policy.FailOnNew,
+                impact = context.Policy.Impact,
                 baselineFile = context.BaselineFile,
                 suppressed = context.PolicyApplication.SuppressedDiagnostics.Count,
                 excluded = context.PolicyApplication.ExcludedDiagnostics.Count,
@@ -211,6 +233,7 @@ public static class ResultJsonSerializer
         }
 
         WriteOptionalString(writer, "originalCode", diagnostic.OriginalCode);
+        WriteOptionalString(writer, "packageId", diagnostic.PackageId);
         if (context is not null)
         {
             var fingerprint = DiagnosticFingerprint.Compute(diagnostic, context.RepositoryRoot);

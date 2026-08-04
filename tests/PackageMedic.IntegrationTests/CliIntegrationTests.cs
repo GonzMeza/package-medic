@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO.Compression;
 using System.Text.Json;
 using PackageMedic.Cli;
 using PackageMedic.Core;
@@ -7,6 +8,133 @@ namespace PackageMedic.IntegrationTests;
 
 public sealed class CliIntegrationTests
 {
+    [Fact]
+    public void SimulationOptionsRequireAnExactCandidateAndRejectIncompatibleModes()
+    {
+        var parsed = CliOptions.Parse([
+            "simulate", "Example.Package", "src/App.csproj", "--to", "2.0.0",
+            "--audit", "--deprecated", "--format", "json",
+            "--credential-env", "CONTOSO_FEED_TOKEN",
+            "--credential-env", "VSS_NUGET_EXTERNAL_FEED_ENDPOINTS",
+        ]);
+
+        Assert.Equal(CliCommand.Simulate, parsed.Command);
+        Assert.Equal("Example.Package", parsed.SimulationPackageId);
+        Assert.Equal("2.0.0", parsed.SimulationTargetVersion);
+        Assert.Equal("src/App.csproj", parsed.Path);
+        Assert.True(parsed.AuditVulnerabilities);
+        Assert.True(parsed.AuditDeprecatedPackages);
+        Assert.Equal(
+            ["CONTOSO_FEED_TOKEN", "VSS_NUGET_EXTERNAL_FEED_ENDPOINTS"],
+            parsed.SimulationCredentialEnvironmentVariables);
+        Assert.Throws<UsageException>(() => CliOptions.Parse(["simulate", "Example.Package"]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "simulate", "Example.Package", "--to", "2.0.0", "--no-restore",
+        ]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "simulate", "Example.Package", "--to", "2.0.0", "--format", "sarif",
+        ]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "simulate", "Example.Package", "--to", "2.0.0",
+            "--credential-env", "TOKEN=unsafe",
+        ]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "simulate", "Example.Package", "--to", "2.0.0",
+            "--credential-env", "TOKEN", "--credential-env", "token",
+        ]));
+    }
+
+    [Fact]
+    public void DeprecationAndTransitiveAuditOptionsPreserveExplicitIntent()
+    {
+        var deprecated = CliOptions.Parse(["doctor", ".", "--deprecated", "--include-transitive"]);
+        var legacyShorthand = CliOptions.Parse(["doctor", ".", "--include-transitive"]);
+        var combined = CliOptions.Parse(["audit", ".", "--deprecated"]);
+        var split = CliOptions.Parse([
+            "audit", ".", "--include-transitive-audit", "--deprecated",
+        ]);
+
+        Assert.True(deprecated.AuditDeprecatedPackages);
+        Assert.True(deprecated.IncludeTransitiveDeprecatedPackages);
+        Assert.False(deprecated.IncludeTransitive);
+        Assert.False(deprecated.AuditVulnerabilities);
+        Assert.True(legacyShorthand.AuditVulnerabilities);
+        Assert.True(legacyShorthand.IncludeTransitive);
+        Assert.True(combined.AuditVulnerabilities);
+        Assert.True(combined.AuditDeprecatedPackages);
+        Assert.True(split.IncludeTransitive);
+        Assert.False(split.IncludeTransitiveDeprecatedPackages);
+    }
+
+    [Fact]
+    public void SimulationRestoreClassificationKeepsOperationalFailuresIncomplete()
+    {
+        var mixedAuthentication = new RestoreExecutionResult(
+            [RestoreDiagnostic("NU1102")],
+            ["The source returned 401 Unauthorized."],
+            RestoreProcessFailureKind.Rejected);
+        var unavailable = new RestoreExecutionResult(
+            [RestoreDiagnostic("NU1301")],
+            ["The service index could not be loaded."],
+            RestoreProcessFailureKind.Rejected);
+        var unknown = new RestoreExecutionResult(
+            [],
+            ["A repository-defined restore target failed."],
+            RestoreProcessFailureKind.Rejected);
+        var missingVersion = new RestoreExecutionResult(
+            [RestoreDiagnostic("NU1102")],
+            ["The requested version is absent."],
+            RestoreProcessFailureKind.Rejected);
+
+        var authenticationKind = Program.ClassifySimulationRestoreFailure(
+            mixedAuthentication,
+            DependencySimulationLockedMode.NotEnabled);
+        var unavailableKind = Program.ClassifySimulationRestoreFailure(
+            unavailable,
+            DependencySimulationLockedMode.NotEnabled);
+        var unknownKind = Program.ClassifySimulationRestoreFailure(
+            unknown,
+            DependencySimulationLockedMode.NotEnabled);
+        var missingVersionKind = Program.ClassifySimulationRestoreFailure(
+            missingVersion,
+            DependencySimulationLockedMode.NotEnabled);
+
+        Assert.Equal(DependencySimulationRestoreFailureKind.AuthenticationFailed, authenticationKind);
+        Assert.Equal(DependencySimulationRestoreFailureKind.SourceUnavailable, unavailableKind);
+        Assert.Equal(DependencySimulationRestoreFailureKind.Unknown, unknownKind);
+        Assert.False(Program.IsDeterministicCandidateRejection(authenticationKind));
+        Assert.False(Program.IsDeterministicCandidateRejection(unavailableKind));
+        Assert.False(Program.IsDeterministicCandidateRejection(unknownKind));
+        Assert.True(Program.IsDeterministicCandidateRejection(missingVersionKind));
+    }
+
+    [Fact]
+    public void SimulationReportsLockedModeOnlyForAffectedProjects()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "packagemedic-lock-state");
+        var settings = new[]
+        {
+            new ProjectPackageSettings(Path.Combine(root, "src", "App.csproj"), false, false)
+            {
+                RestoreLockedMode = false,
+            },
+            new ProjectPackageSettings(Path.Combine(root, "src", "Locked.csproj"), false, false)
+            {
+                RestoreLockedMode = true,
+            },
+        };
+
+        Assert.Equal(
+            DependencySimulationLockedMode.NotEnabled,
+            Program.ResolveSimulationLockedMode(settings, root, ["src/App.csproj"]));
+        Assert.Equal(
+            DependencySimulationLockedMode.Enforced,
+            Program.ResolveSimulationLockedMode(settings, root, ["src/Locked.csproj"]));
+        Assert.Equal(
+            DependencySimulationLockedMode.Mixed,
+            Program.ResolveSimulationLockedMode(settings, root, ["src/App.csproj", "src/Locked.csproj"]));
+    }
+
     [Fact]
     public async Task ParallelismOptionIsValidatedAndAccepted()
     {
@@ -446,7 +574,7 @@ public sealed class CliIntegrationTests
             Assert.Equal(0, result.ExitCode);
             using var json = JsonDocument.Parse(result.Output);
             var change = Assert.Single(json.RootElement.GetProperty("diff").GetProperty("packageChanges").EnumerateArray());
-            Assert.Equal("versionChanged", change.GetProperty("kind").GetString());
+            Assert.Equal("upgraded", change.GetProperty("kind").GetString());
             Assert.Equal("1.0.0", change.GetProperty("before").GetProperty("resolvedVersion").GetString());
             Assert.Equal("2.0.0", change.GetProperty("after").GetProperty("resolvedVersion").GetString());
             Assert.Contains(
@@ -504,6 +632,59 @@ public sealed class CliIntegrationTests
             }
 
             repository.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task DiffUsesIndependentNuGetCachesForSameIdentityPackageContent()
+    {
+        var repository = Directory.CreateTempSubdirectory("PackageMedic.DiffCacheIsolation.");
+        try
+        {
+            var baselineFeed = Directory.CreateDirectory(Path.Combine(repository.FullName, "baseline-feed"));
+            var currentFeed = Directory.CreateDirectory(Path.Combine(repository.FullName, "current-feed"));
+            CreatePackage(baselineFeed.FullName, "Example.Package", "1.0.0", contentMarker: "baseline");
+            CreatePackage(currentFeed.FullName, "Example.Package", "1.0.0", contentMarker: "current-different");
+            var project = Path.Combine(repository.FullName, "App.csproj");
+            await File.WriteAllTextAsync(
+                project,
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup><TargetFramework>net8.0</TargetFramework></PropertyGroup>
+                  <ItemGroup><PackageReference Include="Example.Package" Version="1.0.0" /></ItemGroup>
+                </Project>
+                """,
+                TestContext.Current.CancellationToken);
+            var config = Path.Combine(repository.FullName, "NuGet.Config");
+            await File.WriteAllTextAsync(
+                config,
+                "<configuration><packageSources><clear /><add key=\"local\" value=\"./baseline-feed\" /></packageSources></configuration>",
+                TestContext.Current.CancellationToken);
+            await RunGitAsync(repository.FullName, "init");
+            await RunGitAsync(repository.FullName, "config", "user.name", "PackageMedic Tests");
+            await RunGitAsync(repository.FullName, "config", "user.email", "packagemedic@example.invalid");
+            await RunGitAsync(repository.FullName, "add", ".");
+            await RunGitAsync(repository.FullName, "commit", "-m", "baseline package content");
+            await File.WriteAllTextAsync(
+                config,
+                "<configuration><packageSources><clear /><add key=\"local\" value=\"./current-feed\" /></packageSources></configuration>",
+                TestContext.Current.CancellationToken);
+
+            var result = await RunAsync(
+                "diff", "HEAD", repository.FullName, "--format", "json",
+                "--fail-on", "none", "--verbosity", "quiet");
+
+            Assert.Equal(1, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            var impact = json.RootElement.GetProperty("diff").GetProperty("impact");
+            Assert.Equal(1, impact.GetProperty("summary").GetProperty("contentChanges").GetInt32());
+            Assert.Contains(
+                impact.GetProperty("violations").EnumerateArray(),
+                violation => violation.GetProperty("code").GetString() == "PMI010");
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
         }
     }
 
@@ -663,6 +844,349 @@ public sealed class CliIntegrationTests
         Assert.Contains("apply is intentionally unavailable", planned.Output, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task SimulationComparesARealLocalPackageWithoutChangingTheRepository()
+    {
+        var repository = Directory.CreateTempSubdirectory("PackageMedic.SimulationIntegration.");
+        try
+        {
+            var feed = Directory.CreateDirectory(Path.Combine(repository.FullName, "feed"));
+            CreatePackage(feed.FullName, "Example.Package", "1.0.0");
+            CreatePackage(feed.FullName, "Example.Package", "2.0.0");
+            var project = Path.Combine(repository.FullName, "App.csproj");
+            await File.WriteAllTextAsync(
+                Path.Combine(repository.FullName, "NuGet.Config"),
+                """
+                <configuration>
+                  <packageSources>
+                    <clear />
+                    <add key="local" value="./feed" />
+                  </packageSources>
+                  <packageSourceMapping>
+                    <packageSource key="local"><package pattern="*" /></packageSource>
+                  </packageSourceMapping>
+                </configuration>
+                """,
+                TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                project,
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net8.0</TargetFramework>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <PackageReference Include="Example.Package" Version="1.0.0" />
+                  </ItemGroup>
+                </Project>
+                """,
+                TestContext.Current.CancellationToken);
+            await RunGitAsync(repository.FullName, "init");
+            await RunGitAsync(repository.FullName, "config", "user.name", "PackageMedic Tests");
+            await RunGitAsync(repository.FullName, "config", "user.email", "packagemedic@example.invalid");
+            await RunGitAsync(repository.FullName, "add", ".");
+            await RunGitAsync(repository.FullName, "commit", "-m", "simulation baseline");
+
+            var result = await RunAsync(
+                "simulate", "Example.Package", "--to", "2.0.0", project,
+                "--format", "json", "--fail-on", "none", "--verbosity", "quiet");
+            var repeated = await RunAsync(
+                "simulate", "Example.Package", "--to", "2.0.0", project,
+                "--format", "json", "--fail-on", "none", "--verbosity", "quiet");
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal(string.Empty, result.Error);
+            Assert.Equal(0, repeated.ExitCode);
+            Assert.Equal(string.Empty, repeated.Error);
+            Assert.Equal(result.Output, repeated.Output);
+            Assert.DoesNotContain(repository.FullName, result.Output, StringComparison.OrdinalIgnoreCase);
+            using var json = JsonDocument.Parse(result.Output);
+            Assert.Equal("dependencySimulation", json.RootElement.GetProperty("kind").GetString());
+            Assert.True(json.RootElement.GetProperty("isComplete").GetBoolean());
+            Assert.Equal("pass", json.RootElement.GetProperty("verdict").GetString());
+            Assert.Equal("restoreOnly", json.RootElement.GetProperty("verification").GetProperty("evidenceLevel").GetString());
+            Assert.Equal("notRun", json.RootElement.GetProperty("verification").GetProperty("build").GetString());
+            Assert.Equal("App.csproj", json.RootElement.GetProperty("repository").GetProperty("analysisTarget").GetString());
+            Assert.Equal("1.0.0", json.RootElement.GetProperty("mutation").GetProperty("beforeVersion").GetString());
+            Assert.Equal("2.0.0", json.RootElement.GetProperty("mutation").GetProperty("candidateVersion").GetString());
+            Assert.Contains(
+                json.RootElement.GetProperty("comparison").GetProperty("packageChanges").EnumerateArray(),
+                change => change.GetProperty("kind").GetString() == "upgraded");
+            Assert.Contains(
+                "Version=\"1.0.0\"",
+                await File.ReadAllTextAsync(project, TestContext.Current.CancellationToken),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            foreach (var file in Directory.EnumerateFiles(repository.FullName, "*", SearchOption.AllDirectories))
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+            }
+
+            repository.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SimulationTreatsAMissingCandidateAsACompleteRejection()
+    {
+        var (repository, project) = await CreateSimulationRepositoryAsync("1.0.0");
+        try
+        {
+            var result = await RunAsync(
+                "simulate", "Example.Package", "--to", "9.9.9", project,
+                "--format", "json", "--fail-on", "none", "--verbosity", "quiet");
+
+            Assert.Equal(1, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            Assert.True(json.RootElement.GetProperty("isComplete").GetBoolean());
+            Assert.Equal("reject", json.RootElement.GetProperty("verdict").GetString());
+            Assert.Equal("failed", json.RootElement.GetProperty("verification").GetProperty("restore").GetString());
+            Assert.Equal("versionNotFound", json.RootElement.GetProperty("verification").GetProperty("restoreFailureKind").GetString());
+            Assert.False(json.RootElement.GetProperty("comparison").GetProperty("isComplete").GetBoolean());
+            Assert.NotEmpty(json.RootElement.GetProperty("rejectionReasons").EnumerateArray());
+            Assert.Empty(json.RootElement.GetProperty("errors").EnumerateArray());
+            Assert.Contains(
+                "Version=\"1.0.0\"",
+                await File.ReadAllTextAsync(project, TestContext.Current.CancellationToken),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
+    [Fact]
+    public async Task SimulationTreatsAnUnrestorableBaselineAsOperationallyIncomplete()
+    {
+        var (repository, project) = await CreateSimulationRepositoryAsync("0.5.0");
+        try
+        {
+            var result = await RunAsync(
+                "simulate", "Example.Package", "--to", "2.0.0", project,
+                "--format", "json", "--verbosity", "quiet");
+
+            Assert.Equal(2, result.ExitCode);
+            Assert.Equal(string.Empty, result.Output);
+            Assert.Contains("baseline restore or analysis was incomplete", result.Error, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
+    [Fact]
+    public async Task SimulationReportsNoChangeForANuGetEquivalentVersion()
+    {
+        var (repository, project) = await CreateSimulationRepositoryAsync("1.0.0");
+        try
+        {
+            var result = await RunAsync(
+                "simulate", "example.package", "--to", "1.0", project,
+                "--format", "json", "--fail-on", "none", "--verbosity", "quiet");
+
+            Assert.Equal(0, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            Assert.True(
+                json.RootElement.GetProperty("verdict").GetString() == "noChange",
+                result.Output);
+            Assert.True(json.RootElement.GetProperty("mutation").GetProperty("noChange").GetBoolean());
+            Assert.True(json.RootElement.GetProperty("comparison").GetProperty("isComplete").GetBoolean());
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
+    [Fact]
+    public async Task SimulationReportsVisibleRequestedVersionAndDiagnosticChangesEvenWhenResolutionMatches()
+    {
+        var (repository, project) = await CreateSimulationRepositoryAsync("2.0.0");
+        try
+        {
+            var result = await RunAsync(
+                "simulate", "Example.Package", "--to", "2.0.0", project,
+                "--format", "json", "--fail-on", "none", "--verbosity", "quiet");
+
+            Assert.Equal(0, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            Assert.Equal("pass", json.RootElement.GetProperty("verdict").GetString());
+            Assert.False(json.RootElement.GetProperty("mutation").GetProperty("noChange").GetBoolean());
+            Assert.True(json.RootElement.GetProperty("comparison").GetProperty("isComplete").GetBoolean());
+            Assert.NotEmpty(json.RootElement.GetProperty("comparison").GetProperty("diagnosticChanges").EnumerateArray());
+            Assert.NotEmpty(json.RootElement.GetProperty("comparison").GetProperty("packageChanges").EnumerateArray());
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
+    [Fact]
+    public async Task SimulationRejectsARealCandidateThatExceedsTheTransitiveImpactBudget()
+    {
+        var (repository, project) = await CreateSimulationRepositoryAsync("1.0.0", "2.0.0");
+        try
+        {
+            var feed = Path.Combine(repository.FullName, "feed");
+            File.Delete(Path.Combine(feed, "Example.Package.2.0.0.nupkg"));
+            CreatePackage(feed, "Transitive.Package", "1.0.0");
+            CreatePackage(
+                feed,
+                "Example.Package",
+                "2.0.0",
+                dependencyId: "Transitive.Package",
+                dependencyVersion: "1.0.0");
+            await File.WriteAllTextAsync(
+                Path.Combine(repository.FullName, ".packagemedic.json"),
+                """
+                {
+                  "schemaVersion": 1,
+                  "impact": {
+                    "maxAddedTransitivePackages": 0
+                  }
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            await RunGitAsync(repository.FullName, "add", ".");
+            await RunGitAsync(repository.FullName, "commit", "--amend", "--no-edit");
+
+            var result = await RunAsync(
+                "simulate", "Example.Package", "--to", "2.0.0", project,
+                "--format", "json", "--fail-on", "none", "--verbosity", "quiet");
+
+            Assert.Equal(1, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            Assert.True(json.RootElement.GetProperty("isComplete").GetBoolean());
+            Assert.Equal("reject", json.RootElement.GetProperty("verdict").GetString());
+            var impact = json.RootElement
+                .GetProperty("comparison")
+                .GetProperty("impact");
+            Assert.False(impact.GetProperty("gatePassed").GetBoolean());
+            Assert.Contains(
+                impact.GetProperty("violations").EnumerateArray(),
+                item => item.GetProperty("code").GetString() == "PMI004");
+            Assert.Contains(
+                impact.GetProperty("packages").EnumerateArray(),
+                item => item.GetProperty("packageId").GetString() == "Transitive.Package" &&
+                    item.GetProperty("dependencyKind").GetString() == "transitive");
+            Assert.NotEmpty(json.RootElement.GetProperty("rejectionReasons").EnumerateArray());
+            Assert.Contains(
+                "Version=\"1.0.0\"",
+                await File.ReadAllTextAsync(project, TestContext.Current.CancellationToken),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
+    [Fact]
+    public async Task SimulationRefusesADirtyRepositoryBeforeMaterializingSnapshots()
+    {
+        var (repository, project) = await CreateSimulationRepositoryAsync("1.0.0", "2.0.0");
+        try
+        {
+            await File.AppendAllTextAsync(
+                project,
+                Environment.NewLine + "<!-- dirty -->",
+                TestContext.Current.CancellationToken);
+
+            var result = await RunAsync(
+                "simulate", "Example.Package", "--to", "2.0.0", project,
+                "--format", "json", "--verbosity", "quiet");
+
+            Assert.Equal(2, result.ExitCode);
+            Assert.Equal(string.Empty, result.Output);
+            Assert.Contains("clean Git worktree", result.Error, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
+    [Fact]
+    public async Task SimulationDistinguishesALockedModeConflictFromCandidateIncompatibility()
+    {
+        var repository = Directory.CreateTempSubdirectory("PackageMedic.SimulationLock.");
+        try
+        {
+            var feed = Directory.CreateDirectory(Path.Combine(repository.FullName, "feed"));
+            CreatePackage(feed.FullName, "Example.Package", "1.0.0");
+            CreatePackage(feed.FullName, "Example.Package", "2.0.0");
+            var project = Path.Combine(repository.FullName, "App.csproj");
+            var config = Path.Combine(repository.FullName, "NuGet.Config");
+            var packages = Path.Combine(repository.FullName, "temporary-packages");
+            await File.WriteAllTextAsync(
+                config,
+                """
+                <configuration>
+                  <packageSources><clear /><add key="local" value="./feed" /></packageSources>
+                </configuration>
+                """,
+                TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                project,
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net8.0</TargetFramework>
+                    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+                    <RestoreLockedMode>false</RestoreLockedMode>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <PackageReference Include="Example.Package" Version="1.0.0" />
+                  </ItemGroup>
+                </Project>
+                """,
+                TestContext.Current.CancellationToken);
+            await RunDotNetAsync(
+                repository.FullName,
+                "restore", project, "--configfile", config, "--packages", packages, "--nologo");
+            var unlocked = await File.ReadAllTextAsync(project, TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                project,
+                unlocked.Replace(
+                    "<RestoreLockedMode>false</RestoreLockedMode>",
+                    "<RestoreLockedMode>true</RestoreLockedMode>",
+                    StringComparison.Ordinal),
+                TestContext.Current.CancellationToken);
+            Directory.Delete(Path.Combine(repository.FullName, "obj"), recursive: true);
+            Directory.Delete(packages, recursive: true);
+            await RunGitAsync(repository.FullName, "init");
+            await RunGitAsync(repository.FullName, "config", "user.name", "PackageMedic Tests");
+            await RunGitAsync(repository.FullName, "config", "user.email", "packagemedic@example.invalid");
+            await RunGitAsync(repository.FullName, "add", ".");
+            await RunGitAsync(repository.FullName, "commit", "-m", "locked simulation fixture");
+
+            var result = await RunAsync(
+                "simulate", "Example.Package", "--to", "2.0.0", project,
+                "--format", "json", "--fail-on", "none", "--verbosity", "quiet");
+
+            Assert.Equal(1, result.ExitCode);
+            using var json = JsonDocument.Parse(result.Output);
+            Assert.True(json.RootElement.GetProperty("isComplete").GetBoolean());
+            Assert.Equal("reject", json.RootElement.GetProperty("verdict").GetString());
+            var verification = json.RootElement.GetProperty("verification");
+            Assert.Equal("failed", verification.GetProperty("restore").GetString());
+            Assert.Equal("lockedModeConflict", verification.GetProperty("restoreFailureKind").GetString());
+            Assert.Equal("enforced", verification.GetProperty("lockedMode").GetString());
+            Assert.Contains(
+                json.RootElement.GetProperty("rejectionReasons").EnumerateArray(),
+                item => item.GetString()!.Contains("regenerating", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
     private static async Task<CliResult> RunAsync(params string[] arguments)
     {
         using var output = new StringWriter();
@@ -715,6 +1239,123 @@ public sealed class CliIntegrationTests
         """,
         TestContext.Current.CancellationToken);
 
+    private static void CreatePackage(
+        string feed,
+        string packageId,
+        string version,
+        string? dependencyId = null,
+        string? dependencyVersion = null,
+        string? contentMarker = null)
+    {
+        if ((dependencyId is null) != (dependencyVersion is null))
+        {
+            throw new ArgumentException("A package dependency requires both an ID and a version.");
+        }
+
+        var dependencies = dependencyId is null
+            ? string.Empty
+            : $$"""
+                    <dependencies>
+                      <group targetFramework="net8.0">
+                        <dependency id="{{dependencyId}}" version="[{{dependencyVersion}}]" />
+                      </group>
+                    </dependencies>
+                """;
+        var destination = Path.Combine(feed, $"{packageId}.{version}.nupkg");
+        using var archive = ZipFile.Open(destination, ZipArchiveMode.Create);
+        var nuspec = archive.CreateEntry($"{packageId}.nuspec");
+        using (var stream = nuspec.Open())
+        using (var writer = new StreamWriter(stream))
+        {
+            writer.Write(
+                $$"""
+                <?xml version="1.0" encoding="utf-8"?>
+                <package xmlns="http://schemas.microsoft.com/packaging/2013/05/nuspec.xsd">
+                  <metadata>
+                    <id>{{packageId}}</id>
+                    <version>{{version}}</version>
+                    <authors>PackageMedic Tests</authors>
+                    <description>Local integration fixture.</description>
+                {{dependencies}}
+                  </metadata>
+                </package>
+                """);
+        }
+
+        if (contentMarker is not null)
+        {
+            var marker = archive.CreateEntry("content/marker.txt");
+            using var markerStream = marker.Open();
+            using var markerWriter = new StreamWriter(markerStream);
+            markerWriter.Write(contentMarker);
+        }
+    }
+
+    private static Diagnostic RestoreDiagnostic(string code) => new(
+        "PM005",
+        DiagnosticSeverity.Error,
+        "NuGet restore diagnostic",
+        "Restore reported a NuGet diagnostic.",
+        null,
+        null,
+        null,
+        code,
+        "Review restore output.",
+        OriginalCode: code);
+
+    private static async Task<(DirectoryInfo Repository, string Project)> CreateSimulationRepositoryAsync(
+        params string[] versions)
+    {
+        var repository = Directory.CreateTempSubdirectory("PackageMedic.SimulationFixture.");
+        var feed = Directory.CreateDirectory(Path.Combine(repository.FullName, "feed"));
+        foreach (var version in versions)
+        {
+            CreatePackage(feed.FullName, "Example.Package", version);
+        }
+
+        var project = Path.Combine(repository.FullName, "App.csproj");
+        await File.WriteAllTextAsync(
+            Path.Combine(repository.FullName, "NuGet.Config"),
+            """
+            <configuration>
+              <packageSources>
+                <clear />
+                <add key="local" value="./feed" />
+              </packageSources>
+            </configuration>
+            """,
+            TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(
+            project,
+            """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net8.0</TargetFramework>
+              </PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Example.Package" Version="1.0.0" />
+              </ItemGroup>
+            </Project>
+            """,
+            TestContext.Current.CancellationToken);
+        await RunGitAsync(repository.FullName, "init");
+        await RunGitAsync(repository.FullName, "config", "user.name", "PackageMedic Tests");
+        await RunGitAsync(repository.FullName, "config", "user.email", "packagemedic@example.invalid");
+        await RunGitAsync(repository.FullName, "add", ".");
+        await RunGitAsync(repository.FullName, "commit", "-m", "simulation fixture");
+        return (repository, project);
+    }
+
+    private static void DeleteTemporaryRepository(DirectoryInfo repository)
+    {
+        foreach (var file in Directory.EnumerateFiles(repository.FullName, "*", SearchOption.AllDirectories))
+        {
+            File.SetAttributes(file, FileAttributes.Normal);
+        }
+
+        repository.Delete(recursive: true);
+    }
+
     private static async Task RunGitAsync(string workingDirectory, params string[] arguments)
     {
         using var process = new Process
@@ -740,6 +1381,28 @@ public sealed class CliIntegrationTests
         Assert.True(
             process.ExitCode == 0,
             $"git {string.Join(' ', arguments)} failed: {await standardError} {await standardOutput}");
+    }
+
+    private static async Task RunDotNetAsync(string workingDirectory, params string[] arguments)
+    {
+        var environmentRoot = Directory.CreateTempSubdirectory("PackageMedic.DotNetTestEnvironment.");
+        try
+        {
+            var environment = ProcessEnvironment.CreateIsolatedDotNet(environmentRoot.FullName);
+            IProcessRunner runner = new EnvironmentScopedProcessRunner(new ProcessRunner(), environment);
+            var result = await runner.RunAsync(
+                "dotnet",
+                arguments,
+                workingDirectory,
+                TestContext.Current.CancellationToken);
+            Assert.True(
+                result.ExitCode == 0,
+                $"dotnet {string.Join(' ', arguments)} failed: {result.StandardError} {result.StandardOutput}");
+        }
+        finally
+        {
+            environmentRoot.Delete(recursive: true);
+        }
     }
 
     private sealed record CliResult(int ExitCode, string Output, string Error);

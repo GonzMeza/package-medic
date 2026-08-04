@@ -10,7 +10,7 @@ export const docsNavigation: DocsNavigationItem[] = [
     href: "/docs",
     label: "Overview",
     description: "Choose the right PackageMedic workflow.",
-    keywords: "introduction overview start workflow 0.4",
+    keywords: "introduction overview start workflow 0.5",
   },
   {
     href: "/docs/getting-started",
@@ -21,8 +21,8 @@ export const docsNavigation: DocsNavigationItem[] = [
   {
     href: "/docs/commands",
     label: "Commands",
-    description: "Doctor, audit, diff, baseline, and clean.",
-    keywords: "cli doctor audit diff init rules explain baseline clean options exit",
+    description: "Doctor, audit, diff, simulate, baseline, and clean.",
+    keywords: "cli doctor audit deprecated diff simulate init rules explain baseline clean options exit",
   },
   {
     href: "/docs/configuration",
@@ -35,6 +35,18 @@ export const docsNavigation: DocsNavigationItem[] = [
     label: "Baselines",
     description: "Adopt PackageMedic without CI shock.",
     keywords: "baseline new existing resolved update gradual adoption fail-on-new",
+  },
+  {
+    href: "/docs/impact-gate",
+    label: "Impact Gate",
+    description: "Causal paths, blast radius, and source trust.",
+    keywords: "impact gate PMI001 PMI002 PMI003 PMI004 PMI005 PMI006 PMI007 PMI008 PMI009 PMI010 dependency path blast radius provenance content hash sha512 source mapping locked mode",
+  },
+  {
+    href: "/docs/time-machine",
+    label: "Time Machine",
+    description: "Restore-validate one exact package candidate.",
+    keywords: "simulate time machine candidate version snapshot restore what if upgrade rollback lock file credentials",
   },
   {
     href: "/docs/github-action",
@@ -51,8 +63,8 @@ export const docsNavigation: DocsNavigationItem[] = [
   {
     href: "/docs/diagnostics",
     label: "Diagnostics",
-    description: "Reference for PM001 through PM007.",
-    keywords: "PM001 PM002 PM003 PM004 PM005 PM006 PM007 rules warning error",
+    description: "Reference for PM001 through PM008.",
+    keywords: "PM001 PM002 PM003 PM004 PM005 PM006 PM007 PM008 deprecated rules warning error",
   },
   {
     href: "/docs/security",

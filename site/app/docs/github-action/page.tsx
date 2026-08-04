@@ -9,15 +9,16 @@ export default function GitHubActionPage() {
 
 steps:
   - uses: actions/checkout@v6
+    with:
+      fetch-depth: 0
   - uses: GonzMeza/package-medic@v${product.version}
     with:
       path: .
-      config: .packagemedic.json
-      baseline: .packagemedic-baseline.json
-      fail-on: none
-      fail-on-new: warning
       audit: 'true'
       include-transitive-audit: 'true'
+      deprecated: 'true'
+      include-transitive-deprecated: 'true'
+      fail-on: warning
       annotations: new
       upload-sarif: 'true'
       upload-artifact: 'true'`;
@@ -50,10 +51,13 @@ steps:
             [<code key="restore">restore</code>, "true", "Restore before analysis."],
             [<code key="config">config</code>, "unset", "Repository-relative PackageMedic configuration."],
             [<code key="baseline">baseline</code>, "unset", "Repository-relative portable baseline."],
+            [<code key="mode">mode</code>, "auto", "Use unprivileged pull_request diff automatically, or force scan / diff."],
             [<code key="fail">fail-on / fail-on-new</code>, "unset", "Override policy thresholds when supplied."],
             [<code key="audit">audit</code>, "false", "Request official NuGet vulnerability evidence."],
             [<code key="transitive">include-transitive-audit</code>, "true", "Include transitive packages after audit is enabled."],
-            [<code key="diff">diff-base</code>, "unset", "Reachable Git ref to compare with the checkout."],
+            [<code key="deprecated">deprecated</code>, "false", "Request official NuGet deprecation evidence."],
+            [<code key="transitive-deprecated">include-transitive-deprecated</code>, "false", "Include transitive deprecated packages."],
+            [<code key="diff">diff-base</code>, "unset", "Reachable Git ref that overrides mode."],
             [<code key="annotations">annotations</code>, "new", "Emit new, all, or no native file annotations."],
             [<code key="sarif">upload-sarif</code>, "true", "Upload deterministic SARIF to Code Scanning."],
             [<code key="artifact">upload-artifact</code>, "true", "Retain JSON and SARIF for 14 days."],
@@ -67,9 +71,17 @@ steps:
         <p>
           Later steps can read <code>exit-code</code>, <code>json-file</code>, <code>sarif-file</code>,
           <code>errors</code>, <code>warnings</code>, <code>information</code>,
-          <code>artifact-name</code>, and <code>sarif-category</code>. Every action invocation gets an
+          package direction counts, PM007/PM008 introduced/resolved/persistent counts, <code>artifact-name</code>,
+          and <code>sarif-category</code>. Every action invocation gets an
           isolated report directory, artifact name, and SARIF category so repeated scans cannot
           overwrite each other.
+        </p>
+        <p>
+          Pull-request comparisons additionally expose <code>impact-gate-passed</code>,
+          <code>impact-violations</code>, <code>impact-added-direct</code>,
+          <code>impact-added-transitive</code>, <code>impact-max-blast-radius</code>, and
+          <code>impact-source-changes</code>, and <code>impact-content-changes</code>. The job summary
+          lists failed PMI policies and their causal dependency paths.
         </p>
       </section>
 
@@ -81,12 +93,20 @@ steps:
 
 - uses: GonzMeza/package-medic@v${product.version}
   with:
-    diff-base: origin/main
     audit: 'true'
+    deprecated: 'true'
     fail-on: warning`}</CodeBlock>
         <p>
-          Fetch enough history for the base ref. Diff mode rejects <code>baseline</code> and
-          <code>fail-on-new</code> because the Git comparison already defines which findings are new.
+          Auto mode uses the base SHA for an unprivileged <code>pull_request</code> event and rejects
+          <code>pull_request_target</code>, whose default checkout would compare the base against itself.
+          Fetch enough history so the base already exists locally; PackageMedic never fetches or changes Git. <code>diff-base</code> is an explicit
+          override. Diff rejects <code>baseline</code> and <code>fail-on-new</code> because the Git
+          comparison already defines which findings are new.
+        </p>
+        <p>
+          The same run evaluates the committed <code>impact</code> configuration. A policy failure
+          returns exit code <code>1</code> even when diagnostic <code>fail-on</code> is
+          <code>none</code>; an incomplete base or current graph returns <code>2</code>.
         </p>
       </section>
 
@@ -102,7 +122,7 @@ steps:
       </section>
 
       <PageLinks
-        previous={{ href: "/docs/baselines", label: "Baselines" }}
+        previous={{ href: "/docs/time-machine", label: "Time Machine" }}
         next={{ href: "/docs/reports", label: "Reports" }}
       />
     </DocPage>

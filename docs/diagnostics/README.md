@@ -8,7 +8,7 @@ Review target-framework conditions and affected projects, then remove the centra
 
 ## PM002 — PackageVersionDrift
 
-Emitted for each affected non-CPM project when the same direct package has more than one explicit version across the scanned project set. `VersionOverride` is treated as the effective explicit version.
+Emitted for each affected non-CPM project when the same direct package has non-equivalent explicit versions in target-framework scopes shared by multiple projects. Semantically equivalent exact versions such as `1.0` and `1.0.0` do not create noise, and intentionally different versions in disjoint TFM scopes are ignored. `VersionOverride` is treated as the effective explicit version.
 
 Align explicit versions or migrate the package to Central Package Management.
 
@@ -41,3 +41,9 @@ Fixed versions and fixed ranges are not reported. Unresolved MSBuild expressions
 Emitted only when vulnerability auditing is requested and the active SDK's official `dotnet list package --vulnerable` JSON output reports an advisory for a resolved package. The finding records package ID, resolved version, advisory URL, project, target framework, and whether the dependency is direct or transitive.
 
 Low, moderate, and unknown severities map to a PackageMedic warning; high and critical severities map to an error. Use `--include-transitive` to include transitive packages. Review the linked advisory and validate a compatible non-vulnerable update or replacement. Failure to obtain or parse the official audit report is an operational error, not evidence that the graph is safe.
+
+## PM008 — DeprecatedPackage
+
+Emitted only when `--deprecated` is requested and the active SDK's official `dotnet list package --deprecated` JSON output reports a resolved package as deprecated. The finding records package ID, resolved version, NuGet reasons, project, target framework, dependency kind, and the recommended alternative package/version range when the source provides one.
+
+`CriticalBugs` maps to an error; legacy, other, and unknown reasons map to a warning. Direct findings point to their effective `PackageReference` or central `PackageVersion` declaration when available. Use `--include-transitive` for every enabled audit or `--include-transitive-deprecated` for PM008 only. PackageMedic reports the source's evidence but does not automatically replace the package or assume the suggested alternative is compatible.

@@ -28,6 +28,18 @@ const paths = [
     title: "Automate pull requests",
     copy: "Publish annotations, a job summary, JSON, SARIF, and optional Code Scanning results.",
   },
+  {
+    href: "/docs/impact-gate",
+    number: "05",
+    title: "Gate dependency impact",
+    copy: "Trace causal package paths, measure blast radius, and enforce source-trust policy.",
+  },
+  {
+    href: "/docs/time-machine",
+    number: "06",
+    title: "Simulate before editing",
+    copy: "Restore-validate one exact package candidate in disposable snapshots without changing the checkout.",
+  },
 ];
 
 export default function DocsOverview() {
@@ -37,10 +49,11 @@ export default function DocsOverview() {
       title="Diagnose the graph with confidence."
       description="Everything needed to install PackageMedic, choose a workflow, define repository policy, and integrate the result into CI."
     >
-      <Callout title="PackageMedic 0.4 is read-only" tone="success">
+      <Callout title="PackageMedic 0.5 leaves the checkout untouched" tone="success">
         <p>
           Commands inspect dependency evidence and produce reports. They do not rewrite project,
-          props, lock, or assets files. Even <code>clean</code> only supports a dry-run plan.
+          props, lock, or assets files in the checkout. <code>simulate</code> changes only an owned
+          disposable snapshot, and <code>clean</code> supports a dry-run plan only.
         </p>
       </Callout>
 
@@ -69,12 +82,15 @@ package-medic doctor ./MySolution.sln`}</CodeBlock>
       </section>
 
       <section id="capabilities">
-        <h2>What 0.4 can inspect</h2>
+        <h2>What 0.5 can inspect</h2>
         <div className="docs-capability-grid">
           <article><strong>Dependency policy</strong><p>Unused central versions, drift, CPM bypasses, duplicates, floating versions, and restore problems.</p></article>
           <article><strong>Resolved inventory</strong><p>Direct and transitive packages by project, framework, runtime identifier, and dependency kind.</p></article>
           <article><strong>Known vulnerabilities</strong><p>Official NuGet audit evidence, advisory URL, severity, target framework, and direct/transitive context.</p></article>
-          <article><strong>Git graph changes</strong><p>Added, resolved, or worsened diagnostics plus package-version, dependency-kind, and CPM changes.</p></article>
+          <article><strong>Deprecated packages</strong><p>Official NuGet reasons, critical-bug severity, dependency kind, and source-provided replacement guidance.</p></article>
+          <article><strong>PR graph changes</strong><p>Added/removed packages, upgrades, downgrades, dependency-kind transitions, risk deltas, and CPM changes.</p></article>
+          <article><strong>Dependency Impact Gate</strong><p>Causal paths, blast radius, source provenance, growth budgets, source mapping, and locked-restore policy.</p></article>
+          <article><strong>Dependency Time Machine</strong><p>Exact-version restore simulation in two isolated snapshots with byte-preserving declaration edits.</p></article>
           <article><strong>Repository policy</strong><p>Configuration, exclusions, justified suppressions, portable baselines, and new-only gates.</p></article>
           <article><strong>CI-ready reports</strong><p>Readable text, stable JSON, deterministic SARIF, GitHub annotations, summaries, and artifacts.</p></article>
         </div>
@@ -87,7 +103,8 @@ package-medic doctor ./MySolution.sln`}</CodeBlock>
           <li><span>2</span><div><strong>Restore and evaluate</strong><p>Use the active .NET SDK, MSBuild model, imports, conditions, and target frameworks.</p></div></li>
           <li><span>3</span><div><strong>Read the graph</strong><p>Inspect NuGet&apos;s resolved <code>project.assets.json</code> evidence.</p></div></li>
           <li><span>4</span><div><strong>Apply policy</strong><p>Classify rules, suppressions, baselines, and configured failure thresholds.</p></div></li>
-          <li><span>5</span><div><strong>Report</strong><p>Return text, JSON, SARIF, or a Git comparison with a stable exit code.</p></div></li>
+          <li><span>5</span><div><strong>Explain impact</strong><p>Trace changed transitives to their direct root and evaluate repository trust policy.</p></div></li>
+          <li><span>6</span><div><strong>Report</strong><p>Return text, JSON, SARIF, or a Git comparison with a stable exit code.</p></div></li>
         </ol>
       </section>
 

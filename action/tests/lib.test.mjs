@@ -15,6 +15,7 @@ import {
   parseBoolean,
   renderSummary,
   reportDetails,
+  resolveAnalysisMode,
   resolveNugetSource,
   resolveOutputDirectory,
   resolveOptionalWorkspaceFile,
@@ -43,6 +44,23 @@ test('validates optional Git references without restricting useful revision synt
   assert.throws(() => validateGitReference('main branch'));
   assert.throws(() => validateGitReference('main\nnext'));
   assert.throws(() => validateGitReference('a'.repeat(513)));
+});
+
+test('selects pull request diff mode without inventing or fetching Git references', () => {
+  assert.deepEqual(resolveAnalysisMode('auto', '', 'pull_request', 'abc123'), {
+    mode: 'diff', diffBase: 'abc123', automatic: true,
+  });
+  assert.deepEqual(resolveAnalysisMode('auto', '', 'push', ''), {
+    mode: 'scan', diffBase: undefined, automatic: true,
+  });
+  assert.deepEqual(resolveAnalysisMode('scan', 'origin/main', 'push', ''), {
+    mode: 'diff', diffBase: 'origin/main', automatic: false,
+  });
+  assert.throws(() => resolveAnalysisMode('diff', '', 'push', ''), /requires diff-base/u);
+  assert.throws(() => resolveAnalysisMode('auto', '', 'pull_request', ''), /could not resolve/u);
+  assert.throws(
+    () => resolveAnalysisMode('auto', '', 'pull_request_target', 'abc123'),
+    /does not analyze pull_request_target/u);
 });
 
 test('supports baseline-aware annotation modes and legacy booleans', () => {
@@ -200,6 +218,19 @@ test('derives counts from diagnostics instead of trusting stale summary values',
 });
 
 test('summarizes structured Git graph changes', () => {
+  const impactViolation = {
+    code: 'PMI001',
+    message: 'Unsafe [downgrade](https://example.test)\n<img>',
+    suggestedAction: 'Review `the change`',
+    project: 'src/App.csproj',
+    framework: 'net8.0',
+    packageId: 'Example.Package',
+    rootPackageId: 'Root.Package',
+    dependencyPath: [
+      { packageId: 'Root.Package', resolvedVersion: '1.0.0' },
+      { packageId: 'Example.Package', resolvedVersion: '2.0.0' },
+    ],
+  };
   const report = {
     target: '.',
     summary: { projects: 1 },
@@ -209,7 +240,29 @@ test('summarizes structured Git graph changes', () => {
       isComplete: true,
       summary: { added: 1, resolved: 2, severityChanged: 3 },
       packageChanges: [{ kind: 'versionChanged' }, { kind: 'added' }],
+      packageSummary: {
+        added: 1, removed: 0, upgraded: 1, downgraded: 0,
+        uncomparableVersionChanges: 0, directToTransitive: 0, transitiveToDirect: 1,
+      },
+      riskSummary: {
+        vulnerabilitiesIntroduced: 1, vulnerabilitiesResolved: 0,
+        vulnerabilitiesPersistent: 2,
+        deprecationsIntroduced: 0, deprecationsResolved: 1,
+        deprecationsPersistent: 3,
+      },
       projectSettingsChanges: [{ project: 'src/App.csproj' }],
+      impact: {
+        gatePassed: false,
+        summary: {
+          addedDirectPackages: 1,
+          addedTransitivePackages: 4,
+          maximumBlastRadius: 3,
+          sourceChanges: 2,
+          contentChanges: 1,
+          violations: 99,
+        },
+        violations: [impactViolation],
+      },
     },
   };
 
@@ -219,12 +272,43 @@ test('summarizes structured Git graph changes', () => {
     resolved: 2,
     severityChanged: 3,
     packageChanges: 2,
+    packagesAdded: 1,
+    packagesRemoved: 0,
+    packagesUpgraded: 1,
+    packagesDowngraded: 0,
+    uncomparableVersionChanges: 0,
+    directToTransitive: 0,
+    transitiveToDirect: 1,
+    vulnerabilitiesIntroduced: 1,
+    vulnerabilitiesResolved: 0,
+    vulnerabilitiesPersistent: 2,
+    deprecationsIntroduced: 0,
+    deprecationsResolved: 1,
+    deprecationsPersistent: 3,
     projectSettingsChanges: 1,
     complete: true,
     baselineAnalysisErrors: 0,
     currentAnalysisErrors: 0,
+    impact: {
+      gatePassed: false,
+      violations: 1,
+      addedDirect: 1,
+      addedTransitive: 4,
+      maximumBlastRadius: 3,
+      sourceChanges: 2,
+      contentChanges: 1,
+      violationDetails: [impactViolation],
+      omittedViolations: 0,
+    },
   });
-  assert.match(renderSummary(report, details, 1), /\| 1 \| 2 \| 3 \| 2 \| 1 \|/);
+  const summary = renderSummary(report, details, 1);
+  assert.match(summary, /\| 1 \| 2 \| 3 \| 2 \| 1 \|/);
+  assert.match(summary, /\| 1 \| 0 \| 1 \| 0 \| 0 \| 1 \|/);
+  assert.match(summary, /Impact Gate: Blocked/);
+  assert.match(summary, /\| 1 \| 1 \| 4 \| 3 \| 2 \| 1 \|/);
+  assert.match(summary, /Root\.Package@1\.0\.0 → Example\.Package@2\.0\.0/);
+  assert.doesNotMatch(summary, /<img>/);
+  assert.match(summary, /\\<img\\>/);
 });
 
 test('marks incomplete Git comparisons in the job summary', () => {

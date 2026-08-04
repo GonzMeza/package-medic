@@ -31,7 +31,8 @@ public sealed record Diagnostic(
     string Evidence,
     string SuggestedAction,
     DiagnosticConfidence? Confidence = null,
-    string? OriginalCode = null);
+    string? OriginalCode = null,
+    string? PackageId = null);
 
 public sealed record ScanSummary(
     int Solutions,
@@ -54,6 +55,10 @@ public sealed record AnalysisResult(
     public IReadOnlyList<ProjectPackageSettings> ProjectSettings { get; init; } = [];
 
     public IReadOnlyList<PackageVulnerability> Vulnerabilities { get; init; } = [];
+
+    public IReadOnlyList<DeprecatedPackage> DeprecatedPackages { get; init; } = [];
+
+    public IReadOnlyList<PackageDependencyPath> DependencyPaths { get; init; } = [];
 }
 
 public sealed record AnalysisOutcome(AnalysisResult Result, bool HasOperationalError);
@@ -93,12 +98,28 @@ public sealed record PackageInventoryItem(
     PackageDependencyKind DependencyKind,
     string? RequestedVersion,
     string VersionSource,
-    string? RuntimeIdentifier = null);
+    string? RuntimeIdentifier = null,
+    string? SourceFile = null,
+    int? SourceLine = null,
+    string? PackageSource = null,
+    string? ContentHash = null,
+    bool? SignaturePresent = null);
 
 public sealed record ProjectPackageSettings(
     string Project,
     bool ManagePackageVersionsCentrally,
-    bool CentralPackageTransitivePinningEnabled);
+    bool CentralPackageTransitivePinningEnabled)
+{
+    public int PackageSourceCount { get; init; }
+
+    public bool PackageSourceMappingEnabled { get; init; }
+
+    public bool RestorePackagesWithLockFile { get; init; }
+
+    public bool RestoreLockedMode { get; init; }
+
+    public bool LockFileAvailable { get; init; }
+}
 
 public sealed class ProjectAnalysis
 {
@@ -119,6 +140,18 @@ public sealed class ProjectAnalysis
     public required IReadOnlySet<string> TransitivePackages { get; init; }
 
     public IReadOnlyList<PackageInventoryItem> PackageInventory { get; init; } = [];
+
+    public IReadOnlyList<PackageDependencyPath> DependencyPaths { get; init; } = [];
+
+    public int PackageSourceCount { get; init; }
+
+    public bool PackageSourceMappingEnabled { get; init; }
+
+    public bool RestorePackagesWithLockFile { get; init; }
+
+    public bool RestoreLockedMode { get; init; }
+
+    public bool LockFileAvailable { get; init; }
 
     public required IReadOnlyList<Diagnostic> AssetDiagnostics { get; init; }
 

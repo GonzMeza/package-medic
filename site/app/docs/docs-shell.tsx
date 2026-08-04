@@ -68,7 +68,7 @@ export default function DocsShell({ children }: Readonly<{ children: React.React
           </label>
 
           <nav aria-label="Documentation navigation">
-            <span className="docs-nav-label">PackageMedic 0.4</span>
+            <span className="docs-nav-label">PackageMedic 0.5</span>
             {visibleItems.map((item) => {
               const active = pathname === item.href || pathname === `${item.href}/`;
               return (

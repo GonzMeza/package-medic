@@ -19,8 +19,11 @@ test('action metadata declares a composite action and public contract', () => {
     'fail-on-new',
     'config',
     'baseline',
+    'mode',
     'audit',
     'include-transitive-audit',
+    'deprecated',
+    'include-transitive-deprecated',
     'diff-base',
     'max-parallelism',
     'annotations',
@@ -29,12 +32,25 @@ test('action metadata declares a composite action and public contract', () => {
   ]) {
     assert.match(metadata, new RegExp(`^  ${input}:$`, 'm'));
   }
-  for (const output of ['exit-code', 'json-file', 'sarif-file', 'errors', 'warnings', 'information', 'artifact-name', 'sarif-category']) {
+  for (const output of [
+    'exit-code', 'json-file', 'sarif-file', 'errors', 'warnings', 'information',
+    'findings-added', 'findings-resolved', 'severity-changed',
+    'packages-added', 'packages-removed', 'packages-upgraded', 'packages-downgraded',
+    'uncomparable-version-changes', 'direct-to-transitive', 'transitive-to-direct', 'cpm-changes',
+    'vulnerabilities-introduced', 'vulnerabilities-resolved',
+    'vulnerabilities-persistent',
+    'deprecations-introduced', 'deprecations-resolved', 'deprecations-persistent',
+    'impact-gate-passed', 'impact-violations', 'impact-added-direct',
+    'impact-added-transitive', 'impact-max-blast-radius', 'impact-source-changes',
+    'impact-content-changes',
+    'artifact-name', 'sarif-category',
+  ]) {
     assert.match(metadata, new RegExp(`^  ${output}:$`, 'm'));
   }
   assert.match(metadata, /github\/codeql-action\/upload-sarif@[0-9a-f]{40} # v4/);
   assert.match(metadata, /actions\/upload-artifact@[0-9a-f]{40} # v4/);
   assert.doesNotMatch(metadata, /\t/);
+  assert.match(metadata, /include-transitive-deprecated:[\s\S]*?default: 'false'/);
   const repositoryVersion = readFileSync(path.join(repository, 'VERSION'), 'utf8').trim();
   assert.match(metadata, new RegExp(`tool-version:[\\s\\S]*?default: ${repositoryVersion.replaceAll('.', '\\.')}\\s`));
 });
@@ -47,7 +63,9 @@ test('action creates JSON and SARIF from one PackageMedic analysis', () => {
   assert.match(runner, /baseArguments\.push\('--fail-on-new', failOnNew\)/);
   assert.match(runner, /\['diff', diffBase, scanPath/);
   assert.match(runner, /baseArguments\.push\('--audit'\)/);
-  assert.match(runner, /baseArguments\.push\('--include-transitive'\)/);
+  assert.match(runner, /baseArguments\.push\('--deprecated'\)/);
+  assert.match(runner, /baseArguments\.push\('--include-transitive-audit'\)/);
+  assert.match(runner, /baseArguments\.push\('--include-transitive-deprecated'\)/);
   assert.match(runner, /baseArguments\.push\('--max-parallelism', String\(maxParallelism\)\)/);
   assert.match(runner, /runCommand\(executable/);
   assert.doesNotMatch(runner, /spawnSync|result\.stdout|result\.stderr/);
@@ -105,7 +123,7 @@ test('release workflow validates tags, builds assets, and never publishes to NuG
   assert.match(release, /dotnet restore PackageMedic\.sln --locked-mode/);
   assert.match(release, /dotnet build PackageMedic\.sln --configuration Release --no-restore/);
   assert.match(release, /dotnet test PackageMedic\.sln --configuration Release --no-build --no-restore/);
-  assert.match(release, /audit PackageMedic\.sln --no-restore --include-transitive --fail-on warning/);
+  assert.match(release, /audit PackageMedic\.sln --no-restore --deprecated --include-transitive-audit --fail-on warning/);
   assert.match(release, /dotnet pack src\/PackageMedic\.Cli\/PackageMedic\.Cli\.csproj/);
   assert.match(release, /node action\/checksum\.mjs artifacts\/release/);
   assert.match(release, /gh release create/);

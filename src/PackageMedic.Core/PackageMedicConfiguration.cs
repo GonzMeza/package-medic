@@ -23,6 +23,29 @@ public sealed record ConfiguredPolicyTimeouts(
     int? RestoreSeconds = null,
     int? EvaluationSeconds = null);
 
+public sealed record ConfiguredImpactPolicy(
+    bool FailOnDowngrade,
+    bool FailOnDirectToTransitive,
+    int? MaxAddedPackages,
+    int? MaxAddedTransitivePackages,
+    bool FailOnSourceChange,
+    bool FailOnContentChange,
+    bool RequirePackageSourceMapping,
+    bool RequireLockedMode,
+    IReadOnlyList<string> AllowedSources)
+{
+    public static ConfiguredImpactPolicy Default { get; } = new(
+        FailOnDowngrade: true,
+        FailOnDirectToTransitive: true,
+        MaxAddedPackages: null,
+        MaxAddedTransitivePackages: null,
+        FailOnSourceChange: true,
+        FailOnContentChange: true,
+        RequirePackageSourceMapping: false,
+        RequireLockedMode: false,
+        AllowedSources: []);
+}
+
 public sealed record PackageMedicConfiguration(
     int SchemaVersion,
     PolicyFailureLevel? FailOn,
@@ -32,7 +55,8 @@ public sealed record PackageMedicConfiguration(
     IReadOnlyDictionary<string, PolicyRule> Rules,
     IReadOnlyList<PolicySuppression> Suppressions,
     ConfiguredPolicyTimeouts Timeouts,
-    int? MaxParallelism)
+    int? MaxParallelism,
+    ConfiguredImpactPolicy Impact)
 {
     public const int CurrentSchemaVersion = 1;
 
@@ -45,7 +69,8 @@ public sealed record PackageMedicConfiguration(
         new Dictionary<string, PolicyRule>(StringComparer.Ordinal),
         [],
         new ConfiguredPolicyTimeouts(),
-        null);
+        null,
+        ConfiguredImpactPolicy.Default);
 }
 
 public sealed class PackageMedicConfigurationException : Exception
@@ -67,6 +92,8 @@ public static class PackageMedicConfigurationLoader
     internal const int MaximumExcludePatterns = 1000;
     internal const int MaximumSuppressions = 1000;
     internal const int MaximumPatternCharacters = 4096;
+    internal const int MaximumAllowedSources = 100;
+    internal const int MaximumSourceCharacters = 2048;
     private const int MinimumTimeoutSeconds = 1;
     private const int MaximumTimeoutSeconds = 3600;
 
@@ -175,6 +202,7 @@ public static class PackageMedicConfigurationLoader
         var rules = NormalizeRules(raw.Rules, sourceName);
         var suppressions = NormalizeSuppressions(raw.Suppressions, sourceName);
         var timeouts = NormalizeTimeouts(raw.Timeouts, sourceName);
+        var impact = NormalizeImpact(raw.Impact, sourceName);
         ValidateParallelism(raw.MaxParallelism, sourceName);
 
         return new PackageMedicConfiguration(
@@ -186,7 +214,90 @@ public static class PackageMedicConfigurationLoader
             rules,
             suppressions,
             timeouts,
-            raw.MaxParallelism);
+            raw.MaxParallelism,
+            impact);
+    }
+
+    private static ConfiguredImpactPolicy NormalizeImpact(RawImpactPolicy? configured, string sourceName)
+    {
+        if (configured is null)
+        {
+            return ConfiguredImpactPolicy.Default;
+        }
+
+        ValidateImpactLimit(configured.MaxAddedPackages, "impact.maxAddedPackages", sourceName);
+        ValidateImpactLimit(
+            configured.MaxAddedTransitivePackages,
+            "impact.maxAddedTransitivePackages",
+            sourceName);
+        var allowedSources = NormalizeAllowedSources(configured.AllowedSources, sourceName);
+        return new ConfiguredImpactPolicy(
+            configured.FailOnDowngrade ?? ConfiguredImpactPolicy.Default.FailOnDowngrade,
+            configured.FailOnDirectToTransitive ?? ConfiguredImpactPolicy.Default.FailOnDirectToTransitive,
+            configured.MaxAddedPackages,
+            configured.MaxAddedTransitivePackages,
+            configured.FailOnSourceChange ?? ConfiguredImpactPolicy.Default.FailOnSourceChange,
+            configured.FailOnContentChange ?? ConfiguredImpactPolicy.Default.FailOnContentChange,
+            configured.RequirePackageSourceMapping ?? ConfiguredImpactPolicy.Default.RequirePackageSourceMapping,
+            configured.RequireLockedMode ?? ConfiguredImpactPolicy.Default.RequireLockedMode,
+            allowedSources);
+    }
+
+    private static void ValidateImpactLimit(int? value, string property, string sourceName)
+    {
+        if (value is < 0 or > 1_000_000)
+        {
+            throw Invalid(sourceName, $"{property} must be between 0 and 1000000.");
+        }
+    }
+
+    private static IReadOnlyList<string> NormalizeAllowedSources(
+        IReadOnlyList<string?>? configured,
+        string sourceName)
+    {
+        if (configured is null)
+        {
+            return [];
+        }
+
+        if (configured.Count > MaximumAllowedSources)
+        {
+            throw Invalid(
+                sourceName,
+                $"impact.allowedSources cannot contain more than {MaximumAllowedSources} entries.");
+        }
+
+        var sources = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var index = 0; index < configured.Count; index++)
+        {
+            var property = $"impact.allowedSources[{index}]";
+            var source = RequireString(configured[index], property, sourceName);
+            if (source.Length > MaximumSourceCharacters)
+            {
+                throw Invalid(sourceName, $"{property} cannot exceed {MaximumSourceCharacters} characters.");
+            }
+
+            if (source.Equals("local", StringComparison.OrdinalIgnoreCase))
+            {
+                sources.Add("local");
+                continue;
+            }
+
+            if (!Uri.TryCreate(source, UriKind.Absolute, out var uri) ||
+                !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) ||
+                !string.IsNullOrEmpty(uri.UserInfo) ||
+                !string.IsNullOrEmpty(uri.Query) ||
+                !string.IsNullOrEmpty(uri.Fragment))
+            {
+                throw Invalid(
+                    sourceName,
+                    $"{property} must be 'local' or an HTTPS source without credentials, query, or fragment.");
+            }
+
+            sources.Add(uri.AbsoluteUri.TrimEnd('/'));
+        }
+
+        return sources.ToArray();
     }
 
     private static IReadOnlyDictionary<string, PolicyRule> NormalizeRules(
@@ -435,6 +546,8 @@ public static class PackageMedicConfigurationLoader
         public RawTimeouts? Timeouts { get; init; }
 
         public int? MaxParallelism { get; init; }
+
+        public RawImpactPolicy? Impact { get; init; }
     }
 
     private sealed class RawRule
@@ -460,5 +573,26 @@ public static class PackageMedicConfigurationLoader
         public int? RestoreSeconds { get; init; }
 
         public int? EvaluationSeconds { get; init; }
+    }
+
+    private sealed class RawImpactPolicy
+    {
+        public bool? FailOnDowngrade { get; init; }
+
+        public bool? FailOnDirectToTransitive { get; init; }
+
+        public int? MaxAddedPackages { get; init; }
+
+        public int? MaxAddedTransitivePackages { get; init; }
+
+        public bool? FailOnSourceChange { get; init; }
+
+        public bool? FailOnContentChange { get; init; }
+
+        public bool? RequirePackageSourceMapping { get; init; }
+
+        public bool? RequireLockedMode { get; init; }
+
+        public IReadOnlyList<string?>? AllowedSources { get; init; }
     }
 }

@@ -11,7 +11,8 @@ const configuration = `{
   "exclude": ["**/bin/**", "**/obj/**"],
   "rules": {
     "PM006": { "enabled": true, "severity": "warning" },
-    "PM007": { "enabled": true, "severity": "error" }
+    "PM007": { "enabled": true, "severity": "error" },
+    "PM008": { "enabled": true, "severity": "warning" }
   },
   "suppressions": [
     {
@@ -21,6 +22,17 @@ const configuration = `{
       "reason": "Intentional exception tracked in issue 42"
     }
   ],
+  "impact": {
+    "failOnDowngrade": true,
+    "failOnDirectToTransitive": true,
+    "maxAddedPackages": 40,
+    "maxAddedTransitivePackages": 25,
+    "failOnSourceChange": true,
+    "failOnContentChange": true,
+    "requirePackageSourceMapping": true,
+    "requireLockedMode": true,
+    "allowedSources": ["https://api.nuget.org/v3/index.json"]
+  },
   "timeouts": {
     "restoreSeconds": 300,
     "evaluationSeconds": 60
@@ -59,12 +71,31 @@ export default function ConfigurationPage() {
             [<code key="new">failOnNew</code>, "none, warning, error", "Default threshold for findings absent from a baseline."],
             [<code key="baseline">baseline</code>, "Relative path", "Baseline resolved relative to this configuration file."],
             [<code key="exclude">exclude</code>, "Glob array", "Portable repository paths that should not be analyzed."],
-            [<code key="rules">rules</code>, "PM001–PM007 map", "Enable a rule and optionally override its severity."],
+            [<code key="rules">rules</code>, "PM001–PM008 map", "Enable a rule and optionally override its severity."],
             [<code key="supp">suppressions</code>, "Rule selectors", "Document intentional exceptions by path and/or exact package."],
+            [<code key="impact">impact</code>, "Impact Gate object", "Set dependency growth, downgrade, source-trust, source-mapping, and locked-restore policy for diff."],
             [<code key="parallel">maxParallelism</code>, "1–32", "Maximum concurrent restore, audit, and MSBuild processes."],
             [<code key="timeouts">timeouts</code>, "1–3600 seconds", "Bound restore and per-project evaluation."],
           ]}
         />
+      </section>
+
+      <section id="impact">
+        <h2>Impact policy is a separate gate</h2>
+        <p>
+          The <code>impact</code> object applies to complete Git comparisons. Downgrades,
+          direct-to-transitive transitions, source changes, and loss/gain of source evidence fail by default. Package
+          growth budgets, an allowlist, Package Source Mapping, and locked restore are opt-in so
+          teams can adopt them deliberately. A SHA-512 content change under the same package
+          ID/version identity is rejected by default because it deserves explicit supply-chain
+          review.
+        </p>
+        <p>
+          Allowed sources must be credential-free HTTPS URLs; <code>local</code> is supported only
+          as an explicit value. With an active allowlist, unknown source metadata fails closed.
+          Impact violations are not diagnostic suppressions: change the policy through review when
+          the repository boundary genuinely changes.
+        </p>
       </section>
 
       <section id="suppressions">

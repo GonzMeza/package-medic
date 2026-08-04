@@ -7,6 +7,7 @@ namespace PackageMedic.Core;
 
 public sealed class MsBuildProjectEvaluator
 {
+    internal const int MaximumTargetFrameworksPerProject = 128;
     private readonly IProcessRunner processRunner;
     private readonly TimeSpan timeout;
     private readonly SemaphoreSlim processGate;
@@ -20,6 +21,9 @@ public sealed class MsBuildProjectEvaluator
         "ProjectAssetsFile",
         "BaseIntermediateOutputPath",
         "MSBuildProjectDirectory",
+        "RestorePackagesWithLockFile",
+        "RestoreLockedMode",
+        "NuGetLockFilePath",
     ];
 
     public MsBuildProjectEvaluator(IProcessRunner processRunner)
@@ -65,6 +69,11 @@ public sealed class MsBuildProjectEvaluator
         ArgumentNullException.ThrowIfNull(lineLocator);
         var outer = await QueryAsync(projectPath, null, cancellationToken).ConfigureAwait(false);
         var frameworks = SplitFrameworks(outer.Properties);
+        if (frameworks.Count > MaximumTargetFrameworksPerProject)
+        {
+            throw new InvalidDataException(
+                $"Project '{projectPath}' declares more than the {MaximumTargetFrameworksPerProject} target-framework safety limit.");
+        }
         IReadOnlyList<QueryResult> evaluations = frameworks.Count > 1
             ? await Task.WhenAll(frameworks.Select(framework => QueryAsync(projectPath, framework, cancellationToken)))
                 .ConfigureAwait(false)
@@ -119,6 +128,18 @@ public sealed class MsBuildProjectEvaluator
             assetsFile = Path.GetFullPath(assetsFile, Path.GetDirectoryName(projectPath)!);
         }
 
+        var lockFile = GetProperty(properties, "NuGetLockFilePath");
+        if (string.IsNullOrWhiteSpace(lockFile))
+        {
+            lockFile = Path.Combine(Path.GetDirectoryName(projectPath)!, "packages.lock.json");
+        }
+        else if (!Path.IsPathRooted(lockFile))
+        {
+            lockFile = Path.GetFullPath(lockFile, Path.GetDirectoryName(projectPath)!);
+        }
+
+        lockFile = Path.GetFullPath(lockFile);
+
         return new EvaluatedProject(
             projectPath,
             IsTrue(GetProperty(properties, "ManagePackageVersionsCentrally")),
@@ -126,7 +147,10 @@ public sealed class MsBuildProjectEvaluator
             frameworks,
             DeduplicateReferences(directPackages),
             DeduplicateCentralVersions(centralVersions),
-            assetsFile);
+            assetsFile,
+            IsTrue(GetProperty(properties, "RestorePackagesWithLockFile")),
+            IsTrue(GetProperty(properties, "RestoreLockedMode")),
+            lockFile);
     }
 
     private async Task<QueryResult> QueryAsync(string projectPath, string? targetFramework, CancellationToken cancellationToken)
@@ -306,7 +330,60 @@ public sealed record EvaluatedProject(
     IReadOnlyList<string> TargetFrameworks,
     IReadOnlyList<DirectPackageReference> DirectPackages,
     IReadOnlyList<CentralPackageVersion> CentralVersions,
-    string AssetsFile);
+    string AssetsFile,
+    bool RestorePackagesWithLockFile = false,
+    bool RestoreLockedMode = false,
+    string? LockFilePath = null);
+
+internal static class NuGetLockFileValidator
+{
+    internal const long MaximumLockFileBytes = 16L * 1024 * 1024;
+
+    public static bool IsTrustedAndValid(string? lockFilePath, string trustedRoot)
+    {
+        if (string.IsNullOrWhiteSpace(lockFilePath))
+        {
+            return false;
+        }
+
+        try
+        {
+            var path = Path.GetFullPath(lockFilePath);
+            if (!ProjectDiscovery.IsSafelyContained(trustedRoot, path))
+            {
+                return false;
+            }
+
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length == 0 || info.Length > MaximumLockFileBytes)
+            {
+                return false;
+            }
+
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize: 64 * 1024,
+                FileOptions.SequentialScan);
+            using var document = JsonDocument.Parse(stream, new JsonDocumentOptions { MaxDepth = 128 });
+            var root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object &&
+                   root.TryGetProperty("version", out var version) &&
+                   version.ValueKind == JsonValueKind.Number &&
+                   version.TryGetInt32(out var schemaVersion) &&
+                   schemaVersion > 0 &&
+                   root.TryGetProperty("dependencies", out var dependencies) &&
+                   dependencies.ValueKind == JsonValueKind.Object;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                          JsonException or ArgumentException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+}
 
 internal sealed class XmlItemLineLocator
 {
