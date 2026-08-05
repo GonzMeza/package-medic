@@ -390,7 +390,7 @@ public sealed class InfrastructureTests
             var package = Assert.Single(result.PackageInventory);
             Assert.Null(package.PackageSource);
             Assert.Null(package.ContentHash);
-            Assert.False(package.SignaturePresent);
+            Assert.Null(package.SignaturePresent);
         }
         finally
         {
