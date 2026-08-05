@@ -938,7 +938,9 @@ public sealed class CliIntegrationTests
                 "simulate", "Example.Package", "--to", "9.9.9", project,
                 "--format", "json", "--fail-on", "none", "--verbosity", "quiet");
 
-            Assert.Equal(1, result.ExitCode);
+            Assert.True(
+                result.ExitCode == 1,
+                $"missing-candidate simulation returned {result.ExitCode}: {result.Error}{Environment.NewLine}{result.Output}");
             using var json = JsonDocument.Parse(result.Output);
             Assert.True(json.RootElement.GetProperty("isComplete").GetBoolean());
             Assert.Equal("reject", json.RootElement.GetProperty("verdict").GetString());
