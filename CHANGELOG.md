@@ -6,7 +6,7 @@ All notable changes to PackageMedic are documented in this file.
 
 No changes yet.
 
-## [0.5.0] - Unreleased
+## [0.5.0] - 2026-08-05
 
 PackageMedic 0.5 turns the existing read-only graph comparison into pull-request intelligence. Its new dependency Impact Gate explains causal paths and blast radius, enforces source and reproducibility policy, adds official NuGet deprecation data, and lets the GitHub Action select a safe PR comparison automatically without modifying or fetching repository state.
 
