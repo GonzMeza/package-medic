@@ -179,6 +179,53 @@ public sealed class GitSnapshotProviderTests
     }
 
     [Fact]
+    public void ResolvesASymbolicLinkTargetThroughItsLinkedAncestors()
+    {
+        var physicalRoot = CreateTemporaryDirectory("physical-root");
+        var physicalDirectory = Path.Combine(physicalRoot, "repository");
+        Directory.CreateDirectory(physicalDirectory);
+        var linkContainer = CreateTemporaryDirectory("nested-link-container");
+        var ancestorLink = Path.Combine(linkContainer, "ancestor");
+        var nestedLink = Path.Combine(linkContainer, "nested");
+        var linksCreated = false;
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(ancestorLink, physicalRoot);
+                Directory.CreateSymbolicLink(nestedLink, Path.Combine(ancestorLink, "repository"));
+                linksCreated = true;
+            }
+            catch (Exception linkError) when (linkError is
+                IOException or
+                UnauthorizedAccessException or
+                PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            Assert.Equal(
+                GitSnapshotProvider.ResolvePhysicalDirectoryPath(physicalDirectory, requireExisting: true),
+                GitSnapshotProvider.ResolvePhysicalDirectoryPath(nestedLink, requireExisting: true));
+        }
+        finally
+        {
+            if (linksCreated && Directory.Exists(nestedLink))
+            {
+                Directory.Delete(nestedLink, recursive: false);
+            }
+
+            if (Directory.Exists(ancestorLink))
+            {
+                Directory.Delete(ancestorLink, recursive: false);
+            }
+
+            Directory.Delete(linkContainer, recursive: true);
+            Directory.Delete(physicalRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CleansTemporaryDirectoryWhenArchivingFails()
     {
         var repository = CreateTemporaryDirectory("repository");

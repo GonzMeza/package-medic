@@ -1,4 +1,4 @@
-![PackageMedic logo](https://raw.githubusercontent.com/GonzMeza/package-medic/v0.6.0/assets/brand/packagemedic-logo.png)
+![PackageMedic logo](https://raw.githubusercontent.com/GonzMeza/package-medic/v0.6.1/assets/brand/packagemedic-logo.png)
 
 # PackageMedic
 
@@ -8,7 +8,7 @@
 [![NuGet downloads](https://img.shields.io/nuget/dt/PackageMedic.Tool.svg)](https://www.nuget.org/packages/PackageMedic.Tool)
 [![CI status](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml/badge.svg)](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml)
 [![MIT license](https://img.shields.io/github/license/GonzMeza/package-medic)](LICENSE)
-[![Stable status](https://img.shields.io/badge/status-stable%200.6.0-brightgreen)](https://github.com/GonzMeza/package-medic/releases)
+[![Stable status](https://img.shields.io/badge/status-stable%200.6.1-brightgreen)](https://github.com/GonzMeza/package-medic/releases)
 
 PackageMedic 0.6 is the verified-experiments release of the read-only dependency doctor for SDK-style .NET projects. It can compare restore, build, and structured test evidence across independent immutable snapshots; export a deterministic CycloneDX 1.7 NuGet SBOM; and bind conclusive verified diffs to unsigned in-toto analysis evidence. The existing Impact Gate, Dependency Time Machine, PM001-PM008 diagnostics, semantic risk deltas, JSON, SARIF, and GitHub Action remain part of the same workflow.
 
@@ -35,7 +35,7 @@ dotnet tool install --global PackageMedic.Tool
 Install PackageMedic 0.6 explicitly:
 
 ```console
-dotnet tool install --global PackageMedic.Tool --version 0.6.0
+dotnet tool install --global PackageMedic.Tool --version 0.6.1
 ```
 
 Update an existing installation:
@@ -256,7 +256,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v6
-  - uses: GonzMeza/package-medic@v0.6.0
+  - uses: GonzMeza/package-medic@v0.6.1
     with:
       mode: scan
       path: .
@@ -279,7 +279,7 @@ For pull-request dependency diffs, use the unprivileged `pull_request` event, ch
 - uses: actions/checkout@v6
   with:
     fetch-depth: 0
-- uses: GonzMeza/package-medic@v0.6.0
+- uses: GonzMeza/package-medic@v0.6.1
   with:
     audit: 'true'
     deprecated: 'true'

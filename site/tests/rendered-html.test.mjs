@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+const productVersion = (await readFile(new URL("../../VERSION", import.meta.url), "utf8")).trim();
+const productVersionPattern = new RegExp(productVersion.replaceAll(".", "\\."));
+
 test("exports the complete PackageMedic 0.6 landing page", async () => {
   const html = await readFile(new URL("../out/index.html", import.meta.url), "utf8");
   assert.match(html, /<title>PackageMedic/);
@@ -10,7 +13,7 @@ test("exports the complete PackageMedic 0.6 landing page", async () => {
   assert.match(html, /Read-only/);
   assert.match(html, /PM001/);
   assert.match(html, /Stable release/);
-  assert.match(html, /0\.6\.0/);
+  assert.match(html, productVersionPattern);
   assert.doesNotMatch(html, /Development preview/);
   assert.match(html, /SARIF/);
   assert.match(html, /--output/);
@@ -59,7 +62,7 @@ test("exports complete, navigable PackageMedic documentation", async () => {
     const html = await readFile(new URL(`../out/${path}`, import.meta.url), "utf8");
     assert.match(html, /PackageMedic/);
     assert.match(html, /Search documentation/);
-    assert.match(html, /0\.6\.0/);
+    assert.match(html, productVersionPattern);
     assert.match(html, expected);
     assert.match(html, /href="(?:\/package-medic)?\/docs\/diagnostics\/"/);
     assert.match(html, /href="(?:\/package-medic)?\/docs\/time-machine\/"/);

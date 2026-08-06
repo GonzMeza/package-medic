@@ -14,7 +14,7 @@ inputs:
   tool-version:
     description: Exact PackageMedic.Tool NuGet version to install (wildcards are rejected).
     required: false
-    default: 0.6.0
+    default: 0.6.1
   dotnet-version:
     description: .NET SDK version used to install and run PackageMedic.
     required: false

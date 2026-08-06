@@ -388,6 +388,18 @@ test('summarizes comparative build and test verification evidence', () => {
   assert.match(summary, /\| 8 \| 2 \| 1 \|/u);
 });
 
+test('preserves the public camel-case noChange verification status', () => {
+  const details = reportDetails({
+    diagnostics: [],
+    diff: {
+      summary: {},
+      verification: { decision: { verdict: 'noChange' } },
+    },
+  });
+
+  assert.equal(details.diff.verification.status, 'noChange');
+});
+
 test('marks operational verification evidence as incomplete', () => {
   const report = {
     diagnostics: [],

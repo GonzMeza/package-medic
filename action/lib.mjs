@@ -300,18 +300,19 @@ export function reportDetails(report) {
   const verification = report.diff?.verification && typeof report.diff.verification === 'object'
     ? (() => {
         const value = report.diff.verification;
-        const verdict = String(value.decision?.verdict ?? '').trim().toLowerCase();
+        const verdictKey = String(value.decision?.verdict ?? '').trim().toLowerCase();
+        const verdict = verdictKey === 'nochange' ? 'noChange' : verdictKey;
         const blockingSnapshot = String(value.decision?.blockingSnapshot ?? '').trim().toLowerCase();
         const blockingStage = String(value.decision?.blockingStage ?? '').trim().toLowerCase();
         return {
           level: String(value.level ?? '').trim().toLowerCase(),
           status: verdict,
-          buildRegression: verdict === 'reject' && blockingSnapshot === 'candidate' && blockingStage === 'build',
-          testRegression: verdict === 'reject' && blockingSnapshot === 'candidate' && blockingStage === 'test',
+          buildRegression: verdictKey === 'reject' && blockingSnapshot === 'candidate' && blockingStage === 'build',
+          testRegression: verdictKey === 'reject' && blockingSnapshot === 'candidate' && blockingStage === 'test',
           testsPassed: count(value.candidate?.tests?.passed),
           testsFailed: count(value.candidate?.tests?.failed),
           testsSkipped: count(value.candidate?.tests?.skipped),
-          incomplete: verdict === 'incomplete',
+          incomplete: verdictKey === 'incomplete',
           baselineBuild: String(value.baseline?.build?.stage?.status ?? 'notRequested').trim(),
           candidateBuild: String(value.candidate?.build?.stage?.status ?? 'notRequested').trim(),
           baselineTests: String(value.baseline?.tests?.stage?.status ?? 'notRequested').trim(),

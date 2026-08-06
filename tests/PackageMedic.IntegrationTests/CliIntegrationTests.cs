@@ -938,15 +938,6 @@ public sealed class CliIntegrationTests
             Environment.GetEnvironmentVariable("PACKAGEMEDIC_REQUIRE_NATIVE_MTP_E2E"),
             "true",
             StringComparison.OrdinalIgnoreCase);
-        var sdkVersion = await GetDotNetVersionAsync();
-        if (sdkVersion.Major < 10)
-        {
-            Assert.False(
-                requireNativeMtp,
-                $"Native MTP E2E requires .NET 10 or newer, but dotnet resolved to {sdkVersion}.");
-            return;
-        }
-
         var repository = Directory.CreateTempSubdirectory("PackageMedic.NativeMtp.");
         try
         {
@@ -960,6 +951,15 @@ public sealed class CliIntegrationTests
                 }
                 """,
                 TestContext.Current.CancellationToken);
+            var sdkVersion = await GetDotNetVersionAsync(repository.FullName);
+            if (sdkVersion.Major < 10)
+            {
+                Assert.False(
+                    requireNativeMtp,
+                    $"Native MTP E2E requires .NET 10 or newer, but dotnet resolved to {sdkVersion}.");
+                return;
+            }
+
             await File.WriteAllTextAsync(
                 Path.Combine(repository.FullName, "NuGet.Config"),
                 """
@@ -1790,12 +1790,13 @@ public sealed class CliIntegrationTests
             $"git {string.Join(' ', arguments)} failed: {await standardError} {await standardOutput}");
     }
 
-    private static async Task<Version> GetDotNetVersionAsync()
+    private static async Task<Version> GetDotNetVersionAsync(string workingDirectory)
     {
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo("dotnet", "--version")
             {
+                WorkingDirectory = workingDirectory,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,

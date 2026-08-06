@@ -1,2 +1,2 @@
 // Generated from the repository VERSION file. Do not edit directly.
-export const productVersion = "0.6.0";
+export const productVersion = "0.6.1";

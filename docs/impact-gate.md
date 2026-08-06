@@ -105,7 +105,7 @@ Auto mode selects the pull request base commit for an unprivileged `pull_request
   with:
     fetch-depth: 0
 
-- uses: GonzMeza/package-medic@v0.6.0
+- uses: GonzMeza/package-medic@v0.6.1
   with:
     mode: auto
     config: .packagemedic.json

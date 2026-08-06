@@ -6,6 +6,16 @@ All notable changes to PackageMedic are documented in this file.
 
 No changes yet.
 
+## [0.6.1] - 2026-08-06
+
+PackageMedic 0.6.1 is a cross-platform CI and Action contract patch for the verified-experiments release.
+
+### Fixed
+
+- Preserved the documented camel-case `noChange` verification status in GitHub Action outputs.
+- Probed the native Microsoft Testing Platform fixture from its own SDK context so a repository-pinned .NET 9 SDK cannot mask an installed .NET 10 SDK in CI.
+- Canonicalized symbolic-link targets through linked ancestors, including macOS `/var` to `/private/var` aliases, before enforcing the snapshot trust boundary.
+
 ## [0.6.0] - 2026-08-06
 
 PackageMedic 0.6 turns dependency comparison into an opt-in verified experiment while preserving the read-only checkout boundary.
@@ -187,4 +197,5 @@ First stable release of the read-only dependency diagnostics workflow.
 [0.4.0]: https://github.com/GonzMeza/package-medic/compare/v0.1.0...v0.4.0
 [0.5.0]: https://github.com/GonzMeza/package-medic/compare/v0.4.0...v0.5.0
 [0.6.0]: https://github.com/GonzMeza/package-medic/compare/v0.5.0...v0.6.0
-[Unreleased]: https://github.com/GonzMeza/package-medic/compare/v0.6.0...HEAD
+[0.6.1]: https://github.com/GonzMeza/package-medic/compare/v0.6.0...v0.6.1
+[Unreleased]: https://github.com/GonzMeza/package-medic/compare/v0.6.1...HEAD

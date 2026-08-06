@@ -939,7 +939,13 @@ public sealed class GitSnapshotProvider
         }
     }
 
-    internal static string ResolvePhysicalDirectoryPath(string path, bool requireExisting)
+    internal static string ResolvePhysicalDirectoryPath(string path, bool requireExisting) =>
+        ResolvePhysicalDirectoryPath(path, requireExisting, remainingLinkResolutions: 64);
+
+    private static string ResolvePhysicalDirectoryPath(
+        string path,
+        bool requireExisting,
+        int remainingLinkResolutions)
     {
         var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
         var root = Path.GetPathRoot(fullPath);
@@ -976,6 +982,12 @@ public sealed class GitSnapshotProvider
 
             if (entry.Attributes.HasFlag(FileAttributes.ReparsePoint) || entry.LinkTarget is not null)
             {
+                if (remainingLinkResolutions <= 0)
+                {
+                    throw new InvalidOperationException(
+                        "The directory path contains too many symbolic-link or junction indirections.");
+                }
+
                 var resolved = entry.ResolveLinkTarget(returnFinalTarget: true)
                     ?? throw new InvalidOperationException(
                         "The directory path contains an invalid symbolic-link or junction target.");
@@ -985,7 +997,13 @@ public sealed class GitSnapshotProvider
                         "The directory path contains a symbolic link that does not resolve to a directory.");
                 }
 
-                current = Path.GetFullPath(resolved.FullName);
+                // Resolve the target from its filesystem root again. On macOS a link target
+                // may still be reported through an aliased ancestor such as /var, whose
+                // physical path is /private/var.
+                current = ResolvePhysicalDirectoryPath(
+                    resolved.FullName,
+                    requireExisting: true,
+                    remainingLinkResolutions - 1);
                 continue;
             }
 
