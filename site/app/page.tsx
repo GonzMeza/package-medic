@@ -119,7 +119,8 @@ export default function Home() {
             stale central versions, CPM bypasses, floating versions,
             vulnerabilities, deprecations, and PR graph changes—then traces every
             changed transitive to the direct package that caused it and can simulate one exact
-            package candidate without editing your checkout.
+            package candidate without editing your checkout. Opt-in immutable build/test evidence,
+            CycloneDX 1.7, and unsigned in-toto analysis statements make the result CI-ready.
           </p>
 
           <div className="install-box" aria-label="Install PackageMedic">
@@ -209,7 +210,7 @@ export default function Home() {
       <section className="signal-strip" aria-label="Compatibility summary">
         <div><strong>.NET 8–10</strong><span>SDK-style projects</span></div>
         <div><strong>Graph aware</strong><span>Inventory · audit · Git diff</span></div>
-        <div><strong>Text · JSON · SARIF</strong><span>Human and CI output</span></div>
+        <div><strong>JSON · SARIF · SBOM</strong><span>Human and CI evidence</span></div>
         <div><strong>Cross-platform</strong><span>Windows · Linux · macOS</span></div>
       </section>
 
@@ -354,17 +355,17 @@ export default function Home() {
           <div className="terminal-window ci-terminal" aria-label="Dependency Time Machine example">
             <div className="terminal-bar">
               <span /><span /><span />
-              <small>restore-only simulation</small>
+              <small>verified simulation</small>
             </div>
             <div className="terminal-body">
-              <p><i>›</i> package-medic simulate Example.Package --to 2.0.0 .</p>
+              <p><i>›</i> package-medic simulate Example.Package --to 2.0.0 . --verify test</p>
               <p className="muted">Baseline HEAD restored in snapshot A</p>
               <p className="muted">Candidate 2.0.0 restored in snapshot B</p>
               <div className="terminal-rule" />
               <p>Resolved candidate: <b>2.0.0</b></p>
               <p>Added transitives: <b>2</b> · Removed transitives: <b>1</b></p>
-              <p><span className="summary-ok">PASS</span> · restore + graph evidence</p>
-              <p className="muted">Build not run · tests not run · runtime not verified</p>
+              <p><span className="summary-ok">PASS</span> · restore + build + 214 tests</p>
+              <p className="muted">Runtime compatibility and package safety are not claimed</p>
             </div>
           </div>
           <div className="ci-features">
@@ -386,13 +387,16 @@ export default function Home() {
             <article>
               <span>04</span>
               <strong>Honest evidence boundary</strong>
-              <p>A pass proves observed restore and graph policy—not build, tests, runtime, or package safety.</p>
+              <p>Each verdict states whether restore, build, or structured tests ran; runtime and package safety are never claimed.</p>
             </article>
           </div>
         </div>
         <div className="hero-actions">
           <Link className="button secondary" href="/docs/time-machine">
             Explore Dependency Time Machine <span aria-hidden="true">→</span>
+          </Link>
+          <Link className="button secondary" href="/docs/verified-experiments">
+            Explore verified experiments <span aria-hidden="true">→</span>
           </Link>
         </div>
       </section>
@@ -444,7 +448,7 @@ export default function Home() {
             <article>
               <span>04</span>
               <strong>Read-only cleanup</strong>
-              <p>clean --dry-run previews high-confidence candidates; 0.5 has no apply path.</p>
+              <p>clean --dry-run previews high-confidence candidates; 0.6 has no apply path.</p>
             </article>
           </div>
         </div>

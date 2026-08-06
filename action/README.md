@@ -11,7 +11,7 @@ steps:
   - uses: actions/checkout@v6
     with:
       fetch-depth: 0
-  - uses: GonzMeza/package-medic@v0.5.0
+  - uses: GonzMeza/package-medic@v0.6.0
     with:
       path: .
       audit: 'true'
@@ -34,7 +34,7 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 | Input | Default | Purpose |
 | --- | --- | --- |
 | `path` | `.` | Project, solution, or directory to scan |
-| `tool-version` | `0.5.0` | Exact PackageMedic.Tool version |
+| `tool-version` | `0.6.0` | Exact PackageMedic.Tool version |
 | `dotnet-version` | `8.0.x` | SDK used by the action |
 | `nuget-source` | NuGet.org | Exclusive feed used to install the tool |
 | `restore` | `true` | Restore before the first scan |
@@ -48,6 +48,11 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 | `deprecated` | `false` | Ask the active SDK/NuGet tooling for deprecated packages and emit PM008 |
 | `include-transitive-deprecated` | `false` | Include transitive packages when `deprecated` is enabled |
 | `diff-base` | unset | Reachable Git reference that overrides `mode` |
+| `verify` | unset | In diff mode, require immutable `restore`, `build`, or `test` evidence |
+| `build-timeout` | `900` effective | Per-build-target timeout in seconds (`1`-`3600`) |
+| `test-timeout` | `1200` effective | Per-test-project timeout in seconds (`1`-`3600`) |
+| `verification-configuration` | `Release` | Configuration shared by verified build/test stages |
+| `allow-self-hosted-verification` | `false` | Explicitly acknowledge build/test execution on an independently secured self-hosted runner |
 | `verbosity` | `normal` | `quiet`, `normal`, or `detailed` |
 | `max-parallelism` | automatic (up to 4) | Maximum concurrent restore, audit, and MSBuild processes (`1`-`32`) |
 | `annotations` | `new` | `new`, `all`, or `none`; legacy `true`/`false` map to `all`/`none` |
@@ -59,7 +64,9 @@ The default package source is exclusively `https://api.nuget.org/v3/index.json`.
 
 ## Outputs
 
-`exit-code`, report paths, severity counts, artifact identifiers, and diff counts are available to later steps. Diff outputs include packages added/removed/upgraded/downgraded, vulnerabilities and deprecations introduced/resolved/persistent, and the dependency Impact Gate. `impact-gate-passed` is `true` or `false` when a diff contains an impact report and is empty for a normal scan or an older tool. The related numeric outputs are `impact-violations`, `impact-added-direct`, `impact-added-transitive`, `impact-max-blast-radius`, `impact-source-changes`, and `impact-content-changes`. The last two also count loss/gain of source or content-hash evidence for persistent packages; the default policies fail closed on those changes. Exit code `0` means all active gates passed, `1` means a diagnostic or impact policy threshold was reached, and `2` means an operational or configuration error occurred.
+`exit-code`, report paths, severity counts, artifact identifiers, and diff counts are available to later steps. Diff outputs include packages added/removed/upgraded/downgraded, vulnerabilities and deprecations introduced/resolved/persistent, and the dependency Impact Gate. `impact-gate-passed` is `true` or `false` when a diff contains an impact report and is empty for a normal scan or an older tool. The related numeric outputs are `impact-violations`, `impact-added-direct`, `impact-added-transitive`, `impact-max-blast-radius`, `impact-source-changes`, and `impact-content-changes`. The last two also count loss/gain of source or content-hash evidence for persistent packages; the default policies fail closed on those changes.
+
+Verified diffs additionally expose `verification-status`, `build-regression`, `test-regression`, `tests-passed`, `tests-failed`, `tests-skipped`, `verification-incomplete`, `sbom-file`, `sbom-created`, `provenance-file`, and `provenance-created`. Missing or contradictory structured evidence remains incomplete rather than being inferred from an exit code. Exit code `0` means all active gates passed, `1` means a diagnostic, impact, or conclusive verified regression rejected the candidate, and `2` means an operational, configuration, or verification-evidence error occurred.
 
 Every invocation receives its own report folder, artifact name, and SARIF category. This prevents repeated PackageMedic steps in one job from overwriting each other's reports or uploads. The CLI's `--sarif-output` option creates both public machine-readable formats from one analysis.
 
@@ -70,5 +77,7 @@ With a baseline, the recommended CI policy is `fail-on: none` plus `fail-on-new:
 `audit` and `deprecated` delegate to separate official `dotnet list package --vulnerable` and `--deprecated` commands and can contact configured NuGet sources; the action does not implement an advisory client. Their transitive switches have no effect until the corresponding audit is enabled.
 
 In `mode: auto`, unprivileged `pull_request` events compare against `github.event.pull_request.base.sha`; push and manual events run a normal scan. `pull_request_target` is rejected because its default checkout is the trusted base branch and would otherwise compare the base against itself. Do not check out and execute an untrusted PR head in that privileged event. Use `actions/checkout` with `fetch-depth: 0` in a normal `pull_request` workflow so the base commit exists locally. PackageMedic validates the commit but never fetches it. `diff-base` explicitly selects another reachable ref and overrides `mode`. Diff mode rejects `baseline` and `fail-on-new`, reports package/CPM/risk changes and causal impact paths in JSON and the job summary, and places only current added/worsened diagnostics in SARIF. The summary shows at most 20 Impact Gate violations; the JSON artifact retains the complete report. With `restore: 'false'`, both revisions must contain usable tracked assets files; otherwise the comparison fails closed with exit code `2`.
+
+`verify: build` and `verify: test` execute repository-controlled build logic, analyzers, source generators, adapters, and tests in both immutable snapshots. Snapshot isolation protects the checkout but is not an operating-system sandbox. Use GitHub-hosted disposable runners for untrusted pull requests. Persistent self-hosted execution is refused unless `allow-self-hosted-verification: 'true'` is set, and that acknowledgement does not harden or isolate the runner. Native Microsoft Testing Platform mode requires .NET 10 or newer, a matching `global.json` runner selection, and repository-provided TRX reporting support.
 
 Artifact and category base names accept letters, numbers, dots, underscores, and hyphens. Custom `output-directory` values must identify an existing base directory; the action creates only its isolated child directory after verifying that the base stays within the workspace or runner temporary directory.

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import CodeBlock from "../code-block";
 import { Callout, DocPage, PageLinks } from "../components";
 
@@ -129,6 +130,13 @@ package-medic doctor ./MySolution.sln --deprecated --include-transitive`}</CodeB
             compatibility, or package-safety attestation.
           </p>
         </Callout>
+        <p>
+          PackageMedic 0.6 can additionally execute builds and tests in both immutable
+          snapshots. That increases the amount of repository-controlled code that runs; it does not
+          add an OS sandbox or container boundary. Review the{" "}
+          <Link href="/docs/verified-experiments">Verified experiments security model</Link> before
+          enabling it, especially on persistent self-hosted runners.
+        </p>
       </section>
 
       <PageLinks

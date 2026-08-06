@@ -1,6 +1,6 @@
 # Dependency Time Machine
 
-Dependency Time Machine is PackageMedic 0.5's restore-validated dependency simulator. It answers a narrow question without editing dependency declarations, lock files, or restore assets in the checkout. An explicit `--output` path is the only intentional checkout write:
+Dependency Time Machine is PackageMedic 0.6's verified dependency simulator. It answers a narrow question without editing dependency declarations, lock files, or restore assets in the checkout. Restore remains the default evidence level; `--verify build|test` is explicit. An `--output` path is the only intentional checkout write:
 
 > What dependency graph and policy result would this repository produce if one exact package version changed?
 
@@ -39,7 +39,7 @@ The XML editor prohibits DTDs and external entities and preserves the original e
 
 The simulation refuses to guess when the package is missing, transitive-only, dynamically versioned, conditionally or multiply declared, imported from outside the snapshot, or dependent on untracked/generated input. Select a narrower `.csproj` or solution when a repository has multiple effective declarations.
 
-Because snapshots must reproduce committed dependency inputs byte-for-byte, v0.5 also refuses tracked `.gitattributes` or repository-local `.git/info/attributes` rules that use `export-ignore` or `export-subst`. A selected target or solution that depends on unmaterialized submodule or Git LFS content fails incomplete rather than producing a pass.
+Because snapshots must reproduce committed dependency inputs byte-for-byte, v0.6 also refuses tracked `.gitattributes` or repository-local `.git/info/attributes` rules that use `export-ignore` or `export-subst`. A selected target or solution that depends on unmaterialized submodule or Git LFS content fails incomplete rather than producing a pass.
 
 ## Isolated process state
 
@@ -113,7 +113,7 @@ The independent schema is [`schemas/packagemedic-simulation.schema.json`](../sch
 - `rejectionReasons`: valid observations that rejected a candidate.
 - `errors`: operational failures that made the simulation incomplete.
 
-Reports contain no temporary paths or timestamps. Hypothetical results are intentionally not emitted as SARIF or uploaded by the GitHub Action in 0.5.
+Reports contain no temporary paths or timestamps. Hypothetical results are intentionally not emitted as SARIF or uploaded by the GitHub Action.
 
 ## Large repositories
 

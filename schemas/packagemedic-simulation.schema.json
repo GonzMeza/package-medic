@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/GonzMeza/package-medic/main/schemas/packagemedic-simulation.schema.json",
   "title": "PackageMedic dependency simulation report",
-  "description": "Schema 1 for the restore-validated Dependency Time Machine report introduced in PackageMedic 0.5.",
+  "description": "Schema 2 for Dependency Time Machine reports, including optional structured restore/build/test verification evidence.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -20,7 +20,7 @@
     "errors"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "kind": { "const": "dependencySimulation" },
     "toolVersion": { "type": "string", "minLength": 1 },
     "repository": {
@@ -77,26 +77,222 @@
         "auditedVulnerabilities", "auditedDeprecations", "lockedMode"
       ],
       "properties": {
-        "restore": { "enum": ["passed", "failed", "notRun"] },
+        "restore": { "enum": ["passed", "failed", "incomplete", "notRun"] },
+        "requestedLevel": { "enum": ["restore", "build", "test"] },
         "restoreFailureKind": {
           "enum": [
             "packageNotFound", "versionNotFound", "dependencyConflict", "lockedModeConflict",
             "sourceUnavailable", "authenticationFailed", "timedOut", "outputLimitExceeded", "unknown"
           ]
         },
-        "build": { "const": "notRun" },
-        "tests": { "const": "notRun" },
+        "build": { "enum": ["passed", "failed", "incomplete", "notRun"] },
+        "tests": { "enum": ["passed", "failed", "incomplete", "notRun"] },
         "runtimeCompatibility": { "const": "notVerified" },
-        "evidenceLevel": { "const": "restoreOnly" },
+        "evidenceLevel": { "enum": ["restoreOnly", "buildVerified", "testVerified"] },
         "auditedVulnerabilities": { "type": "boolean" },
         "auditedDeprecations": { "type": "boolean" },
-        "lockedMode": { "enum": ["notEnabled", "enforced", "mixed"] }
+        "lockedMode": { "enum": ["notEnabled", "enforced", "mixed"] },
+        "executed": { "$ref": "#/$defs/verificationComparison" }
       },
       "allOf": [
         {
-          "if": { "properties": { "restore": { "const": "failed" } } },
+          "if": { "properties": { "restore": { "enum": ["failed", "incomplete"] } } },
           "then": { "required": ["restoreFailureKind"] },
           "else": { "not": { "required": ["restoreFailureKind"] } }
+        },
+        {
+          "if": { "not": { "required": ["executed"] } },
+          "then": {
+            "properties": {
+              "build": { "const": "notRun" },
+              "tests": { "const": "notRun" },
+              "evidenceLevel": { "const": "restoreOnly" }
+            }
+          }
+        },
+        {
+          "if": { "required": ["executed"] },
+          "then": {
+            "required": ["requestedLevel"],
+            "allOf": [
+              {
+                "oneOf": [
+                  {
+                    "properties": {
+                      "build": { "const": "notRun" },
+                      "executed": {
+                        "properties": {
+                          "candidate": {
+                            "properties": {
+                              "build": {
+                                "properties": {
+                                  "stage": { "properties": { "status": { "const": "notRequested" } } }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "build": { "const": "passed" },
+                      "executed": {
+                        "properties": {
+                          "candidate": {
+                            "properties": {
+                              "build": {
+                                "properties": { "stage": { "properties": { "status": { "const": "passed" } } } }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "build": { "const": "failed" },
+                      "executed": {
+                        "properties": {
+                          "candidate": {
+                            "properties": {
+                              "build": {
+                                "properties": { "stage": { "properties": { "status": { "const": "failed" } } } }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "build": { "const": "incomplete" },
+                      "executed": {
+                        "properties": {
+                          "candidate": {
+                            "properties": {
+                              "build": {
+                                "properties": { "stage": { "properties": { "status": { "const": "incomplete" } } } }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "oneOf": [
+                  {
+                    "properties": {
+                      "tests": { "const": "notRun" },
+                      "executed": {
+                        "properties": {
+                          "candidate": {
+                            "properties": {
+                              "tests": {
+                                "properties": {
+                                  "stage": { "properties": { "status": { "const": "notRequested" } } }
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "tests": { "const": "passed" },
+                      "executed": {
+                        "properties": {
+                          "candidate": {
+                            "properties": {
+                              "tests": {
+                                "properties": { "stage": { "properties": { "status": { "const": "passed" } } } }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "tests": { "const": "failed" },
+                      "executed": {
+                        "properties": {
+                          "candidate": {
+                            "properties": {
+                              "tests": {
+                                "properties": { "stage": { "properties": { "status": { "const": "failed" } } } }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "tests": { "const": "incomplete" },
+                      "executed": {
+                        "properties": {
+                          "candidate": {
+                            "properties": {
+                              "tests": {
+                                "properties": { "stage": { "properties": { "status": { "const": "incomplete" } } } }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "oneOf": [
+                  {
+                    "properties": {
+                      "evidenceLevel": { "const": "restoreOnly" },
+                      "executed": {
+                        "properties": {
+                          "decision": {
+                            "properties": { "commonEvidenceLevel": { "enum": ["none", "restoreOnly"] } }
+                          }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "evidenceLevel": { "const": "buildVerified" },
+                      "executed": {
+                        "properties": {
+                          "decision": { "properties": { "commonEvidenceLevel": { "const": "buildVerified" } } }
+                        }
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "evidenceLevel": { "const": "testVerified" },
+                      "executed": {
+                        "properties": {
+                          "decision": { "properties": { "commonEvidenceLevel": { "const": "testVerified" } } }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
         }
       ]
     },
@@ -169,9 +365,470 @@
           "errors": { "minItems": 1 }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "verification": {
+            "properties": {
+              "executed": {
+                "properties": {
+                  "decision": { "properties": { "verdict": { "const": "reject" } } }
+                },
+                "required": ["decision"]
+              }
+            },
+            "required": ["executed"]
+          }
+        },
+        "required": ["verification"]
+      },
+      "then": { "properties": { "verdict": { "const": "reject" } } }
+    },
+    {
+      "if": {
+        "properties": {
+          "verification": {
+            "properties": {
+              "executed": {
+                "properties": {
+                  "decision": { "properties": { "verdict": { "const": "incomplete" } } }
+                },
+                "required": ["decision"]
+              }
+            },
+            "required": ["executed"]
+          }
+        },
+        "required": ["verification"]
+      },
+      "then": { "properties": { "verdict": { "const": "incomplete" } } }
     }
   ],
   "$defs": {
+    "verificationComparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["level", "baseline", "candidate", "decision"],
+      "properties": {
+        "level": { "enum": ["restore", "build", "test"] },
+        "baseline": { "$ref": "#/$defs/verificationSnapshot" },
+        "candidate": { "$ref": "#/$defs/verificationSnapshot" },
+        "decision": { "$ref": "#/$defs/verificationDecision" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "level": { "const": "restore" } }, "required": ["level"] },
+          "then": {
+            "properties": {
+              "baseline": { "$ref": "#/$defs/restoreOnlySnapshot" },
+              "candidate": { "$ref": "#/$defs/restoreOnlySnapshot" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "level": { "const": "build" } }, "required": ["level"] },
+          "then": {
+            "properties": {
+              "baseline": { "$ref": "#/$defs/noTestSnapshot" },
+              "candidate": { "$ref": "#/$defs/noTestSnapshot" }
+            }
+          }
+        }
+      ]
+    },
+    "verificationSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["restore", "build", "tests"],
+      "properties": {
+        "restore": { "$ref": "#/$defs/restoreStageEvidence" },
+        "build": { "$ref": "#/$defs/verificationBuildReport" },
+        "tests": { "$ref": "#/$defs/verificationTestReport" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "restore": {
+                "properties": { "status": { "enum": ["failed", "incomplete"] } },
+                "required": ["status"]
+              }
+            },
+            "required": ["restore"]
+          },
+          "then": {
+            "properties": {
+              "build": { "$ref": "#/$defs/notRequestedBuildReport" },
+              "tests": { "$ref": "#/$defs/notRequestedTestReport" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "build": {
+                "properties": {
+                  "stage": {
+                    "properties": { "status": { "enum": ["failed", "incomplete"] } },
+                    "required": ["status"]
+                  }
+                },
+                "required": ["stage"]
+              }
+            },
+            "required": ["build"]
+          },
+          "then": { "properties": { "tests": { "$ref": "#/$defs/notRequestedTestReport" } } }
+        }
+      ]
+    },
+    "restoreOnlySnapshot": {
+      "allOf": [
+        { "$ref": "#/$defs/verificationSnapshot" },
+        {
+          "properties": {
+            "build": { "$ref": "#/$defs/notRequestedBuildReport" },
+            "tests": { "$ref": "#/$defs/notRequestedTestReport" }
+          }
+        }
+      ]
+    },
+    "noTestSnapshot": {
+      "allOf": [
+        { "$ref": "#/$defs/verificationSnapshot" },
+        { "properties": { "tests": { "$ref": "#/$defs/notRequestedTestReport" } } }
+      ]
+    },
+    "restoreStageEvidence": {
+      "allOf": [
+        { "$ref": "#/$defs/stageEvidence" },
+        {
+          "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+          "then": {
+            "properties": {
+              "failureKind": {
+                "enum": ["packageNotFound", "versionNotFound", "dependencyConflict", "lockedModeConflict"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "buildStageEvidence": {
+      "allOf": [
+        { "$ref": "#/$defs/stageEvidence" },
+        {
+          "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+          "then": { "properties": { "failureKind": { "const": "buildFailed" } } }
+        }
+      ]
+    },
+    "testStageEvidence": {
+      "allOf": [
+        { "$ref": "#/$defs/stageEvidence" },
+        {
+          "if": { "properties": { "status": { "const": "failed" } }, "required": ["status"] },
+          "then": { "properties": { "failureKind": { "const": "testsFailed" } } }
+        }
+      ]
+    },
+    "stageEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["notRequested", "passed", "failed", "incomplete"] },
+        "failureKind": { "$ref": "#/$defs/verificationFailureKind" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "enum": ["failed", "incomplete"] } }, "required": ["status"] },
+          "then": { "required": ["failureKind"] },
+          "else": { "not": { "required": ["failureKind"] } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "incomplete" } }, "required": ["status"] },
+          "then": { "properties": { "failureKind": { "$ref": "#/$defs/operationalFailureKind" } } }
+        }
+      ]
+    },
+    "verificationBuildReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "plannedTargets", "completedTargets"],
+      "properties": {
+        "stage": { "$ref": "#/$defs/buildStageEvidence" },
+        "plannedTargets": { "type": "integer", "minimum": 0 },
+        "completedTargets": { "type": "integer", "minimum": 0 },
+        "blockingTarget": { "$ref": "#/$defs/portablePath" },
+        "failure": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "properties": { "status": { "enum": ["notRequested", "passed"] } },
+                "required": ["status"]
+              }
+            },
+            "required": ["stage"]
+          },
+          "then": {
+            "not": { "anyOf": [{ "required": ["blockingTarget"] }, { "required": ["failure"] }] }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "properties": { "status": { "const": "passed" } },
+                "required": ["status"]
+              }
+            },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "plannedTargets": { "type": "integer", "minimum": 1 },
+              "completedTargets": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "properties": { "status": { "enum": ["failed", "incomplete"] } },
+                "required": ["status"]
+              }
+            },
+            "required": ["stage"]
+          },
+          "then": { "required": ["failure"] }
+        }
+      ]
+    },
+    "notRequestedBuildReport": {
+      "allOf": [
+        { "$ref": "#/$defs/verificationBuildReport" },
+        {
+          "properties": {
+            "stage": {
+              "properties": { "status": { "const": "notRequested" } },
+              "required": ["status"]
+            },
+            "plannedTargets": { "const": 0 },
+            "completedTargets": { "const": 0 }
+          }
+        }
+      ]
+    },
+    "verificationTestReport": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage", "plannedProjects", "completedProjects", "total", "passed", "failed", "skipped",
+        "failedTestIdentities", "hasAdditionalFailedTests"
+      ],
+      "properties": {
+        "stage": { "$ref": "#/$defs/testStageEvidence" },
+        "plannedProjects": { "type": "integer", "minimum": 0 },
+        "completedProjects": { "type": "integer", "minimum": 0 },
+        "total": { "type": "integer", "minimum": 0 },
+        "passed": { "type": "integer", "minimum": 0 },
+        "failed": { "type": "integer", "minimum": 0 },
+        "skipped": { "type": "integer", "minimum": 0 },
+        "failedTestIdentities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "hasAdditionalFailedTests": { "type": "boolean" },
+        "failure": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "properties": { "status": { "const": "notRequested" } },
+                "required": ["status"]
+              }
+            },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "plannedProjects": { "const": 0 },
+              "completedProjects": { "const": 0 },
+              "total": { "const": 0 },
+              "passed": { "const": 0 },
+              "failed": { "const": 0 },
+              "skipped": { "const": 0 },
+              "failedTestIdentities": { "maxItems": 0 },
+              "hasAdditionalFailedTests": { "const": false }
+            },
+            "not": { "required": ["failure"] }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "properties": { "status": { "const": "passed" } },
+                "required": ["status"]
+              }
+            },
+            "required": ["stage"]
+          },
+          "then": {
+            "properties": {
+              "plannedProjects": { "type": "integer", "minimum": 1 },
+              "completedProjects": { "type": "integer", "minimum": 1 },
+              "total": { "type": "integer", "minimum": 1 },
+              "failed": { "const": 0 },
+              "failedTestIdentities": { "maxItems": 0 },
+              "hasAdditionalFailedTests": { "const": false }
+            },
+            "not": { "required": ["failure"] }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "stage": {
+                "properties": { "status": { "enum": ["failed", "incomplete"] } },
+                "required": ["status"]
+              }
+            },
+            "required": ["stage"]
+          },
+          "then": { "required": ["failure"] }
+        }
+      ]
+    },
+    "notRequestedTestReport": {
+      "allOf": [
+        { "$ref": "#/$defs/verificationTestReport" },
+        {
+          "properties": {
+            "stage": {
+              "properties": { "status": { "const": "notRequested" } },
+              "required": ["status"]
+            }
+          }
+        }
+      ]
+    },
+    "verificationDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verdict", "baselineEvidenceLevel", "candidateEvidenceLevel", "commonEvidenceLevel",
+        "isComplete", "isAccepted"
+      ],
+      "properties": {
+        "verdict": { "enum": ["pass", "reject", "noChange", "incomplete"] },
+        "baselineEvidenceLevel": { "$ref": "#/$defs/verificationEvidenceLevel" },
+        "candidateEvidenceLevel": { "$ref": "#/$defs/verificationEvidenceLevel" },
+        "commonEvidenceLevel": { "$ref": "#/$defs/verificationEvidenceLevel" },
+        "blockingSnapshot": { "enum": ["baseline", "candidate"] },
+        "blockingStage": { "enum": ["restore", "build", "test"] },
+        "failureKind": { "$ref": "#/$defs/verificationFailureKind" },
+        "isComplete": { "type": "boolean" },
+        "isAccepted": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "verdict": { "enum": ["pass", "noChange"] } }, "required": ["verdict"] },
+          "then": {
+            "properties": { "isComplete": { "const": true }, "isAccepted": { "const": true } },
+            "not": {
+              "anyOf": [
+                { "required": ["blockingSnapshot"] },
+                { "required": ["blockingStage"] },
+                { "required": ["failureKind"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": { "properties": { "verdict": { "const": "reject" } }, "required": ["verdict"] },
+          "then": {
+            "properties": {
+              "blockingSnapshot": { "const": "candidate" },
+              "isComplete": { "const": true },
+              "isAccepted": { "const": false }
+            },
+            "required": ["blockingSnapshot", "blockingStage", "failureKind"]
+          }
+        },
+        {
+          "if": { "properties": { "verdict": { "const": "incomplete" } }, "required": ["verdict"] },
+          "then": {
+            "properties": { "isComplete": { "const": false }, "isAccepted": { "const": false } },
+            "required": ["failureKind"]
+          }
+        },
+        {
+          "if": { "required": ["blockingSnapshot"] },
+          "then": { "required": ["blockingStage"] }
+        },
+        {
+          "if": { "required": ["blockingStage"] },
+          "then": { "required": ["blockingSnapshot"] }
+        },
+        {
+          "if": {
+            "properties": { "blockingStage": { "const": "restore" }, "verdict": { "const": "reject" } },
+            "required": ["blockingStage", "verdict"]
+          },
+          "then": {
+            "properties": {
+              "failureKind": {
+                "enum": ["packageNotFound", "versionNotFound", "dependencyConflict", "lockedModeConflict"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "blockingStage": { "const": "build" }, "verdict": { "const": "reject" } },
+            "required": ["blockingStage", "verdict"]
+          },
+          "then": { "properties": { "failureKind": { "const": "buildFailed" } } }
+        },
+        {
+          "if": {
+            "properties": { "blockingStage": { "const": "test" }, "verdict": { "const": "reject" } },
+            "required": ["blockingStage", "verdict"]
+          },
+          "then": { "properties": { "failureKind": { "const": "testsFailed" } } }
+        }
+      ]
+    },
+    "verificationEvidenceLevel": {
+      "enum": ["none", "restoreOnly", "buildVerified", "testVerified"]
+    },
+    "verificationFailureKind": {
+      "enum": [
+        "packageNotFound", "versionNotFound", "dependencyConflict", "lockedModeConflict",
+        "buildFailed", "testsFailed", "sourceUnavailable", "authenticationFailed", "timedOut",
+        "cancelled", "processStartFailed", "outputLimitExceeded", "resultLimitExceeded",
+        "testResultsUnavailable", "noTestsDiscovered", "unsupportedRunner", "unsafeEnvironment",
+        "snapshotUnavailable", "analysisIncomplete", "comparisonIncomplete", "internalError", "unknown"
+      ]
+    },
+    "operationalFailureKind": {
+      "enum": [
+        "sourceUnavailable", "authenticationFailed", "timedOut", "cancelled", "processStartFailed",
+        "outputLimitExceeded", "resultLimitExceeded", "testResultsUnavailable", "noTestsDiscovered",
+        "unsupportedRunner", "unsafeEnvironment", "snapshotUnavailable", "analysisIncomplete",
+        "comparisonIncomplete", "internalError", "unknown"
+      ]
+    },
     "portablePath": {
       "type": "string",
       "minLength": 1,

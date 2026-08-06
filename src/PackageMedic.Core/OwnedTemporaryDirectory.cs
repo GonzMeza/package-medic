@@ -28,8 +28,23 @@ public sealed class OwnedTemporaryDirectory : IDisposable
         var repository = Path.TrimEndingDirectorySeparator(Path.GetFullPath(repositoryRoot));
         var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(temporaryRoot ?? Path.GetTempPath()));
         Directory.CreateDirectory(root);
+        string physicalRepository;
+        string physicalRoot;
+        try
+        {
+            physicalRepository = GitSnapshotProvider.ResolvePhysicalDirectoryPath(repository, requireExisting: true);
+            physicalRoot = GitSnapshotProvider.ResolvePhysicalDirectoryPath(root, requireExisting: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            throw new InvalidOperationException(
+                "The PackageMedic analysis runtime filesystem boundary could not be validated.",
+                exception);
+        }
+
         if (File.GetAttributes(root).HasFlag(FileAttributes.ReparsePoint) ||
-            ProjectDiscovery.IsSafelyContained(repository, root))
+            GitSnapshotProvider.IsWithin(root, repository) ||
+            GitSnapshotProvider.IsWithin(physicalRoot, physicalRepository))
         {
             throw new InvalidOperationException(
                 "The PackageMedic analysis runtime directory must be a regular directory outside the analyzed repository.");

@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/GonzMeza/package-medic/main/schemas/packagemedic-analysis-attestation.schema.json",
+  "title": "PackageMedic analysis evidence",
+  "description": "Unsigned in-toto Statement v1 carrying PackageMedic analysis evidence for one immutable Git commit. This is not SLSA build provenance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["_type", "subject", "predicateType", "predicate"],
+  "properties": {
+    "_type": { "const": "https://in-toto.io/Statement/v1" },
+    "subject": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "digest"],
+        "properties": {
+          "name": { "const": "repository" },
+          "digest": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["gitCommit"],
+            "properties": {
+              "gitCommit": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" }
+            }
+          }
+        }
+      }
+    },
+    "predicateType": {
+      "const": "https://gonzmeza.github.io/package-medic/attestation/analysis/v1"
+    },
+    "predicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "target", "tool", "configuration", "comparison", "verification"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "target": { "$ref": "#/$defs/portablePath" },
+        "tool": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": { "const": "PackageMedic" },
+            "version": {
+              "type": "string",
+              "minLength": 5,
+              "maxLength": 128,
+              "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+            }
+          }
+        },
+        "configuration": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state"],
+              "properties": { "state": { "const": "none" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["state", "sha256"],
+              "properties": {
+                "state": { "const": "sha256" },
+                "sha256": { "$ref": "#/$defs/sha256" }
+              }
+            }
+          ]
+        },
+        "comparison": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baselineGitCommit", "sha256"],
+          "properties": {
+            "baselineGitCommit": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["level", "status", "completeness"],
+          "properties": {
+            "level": { "enum": ["restore", "build", "test"] },
+            "status": { "enum": ["pass", "reject", "noChange", "incomplete"] },
+            "completeness": { "enum": ["complete", "incomplete"] }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "status": { "const": "incomplete" } }, "required": ["status"] },
+              "then": { "properties": { "completeness": { "const": "incomplete" } } },
+              "else": { "properties": { "completeness": { "const": "complete" } } }
+            }
+          ]
+        },
+        "sbom": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["algorithm", "digest"],
+          "properties": {
+            "algorithm": { "const": "sha256" },
+            "digest": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "portablePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "not": {
+        "pattern": "^(?:[A-Za-z]:|/|\\\\|~|[A-Za-z][A-Za-z0-9+.-]*:)|(?:^|/)\\.\\.(?:/|$)|[?#]"
+      }
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

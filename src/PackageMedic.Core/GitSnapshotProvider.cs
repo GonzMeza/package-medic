@@ -1,4 +1,5 @@
 using System.Formats.Tar;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace PackageMedic.Core;
@@ -11,6 +12,7 @@ public sealed class GitSnapshot : IDisposable
 {
     private readonly string ownedDirectory;
     private readonly string ownershipToken;
+    private readonly Dictionary<string, GitTrackedFileFingerprint> trackedFiles;
     private int disposed;
 
     internal GitSnapshot(
@@ -19,7 +21,8 @@ public sealed class GitSnapshot : IDisposable
         string commit,
         string snapshotDirectory,
         string ownedDirectory,
-        string ownershipToken)
+        string ownershipToken,
+        Dictionary<string, GitTrackedFileFingerprint> trackedFiles)
     {
         RepositoryRoot = repositoryRoot;
         Reference = reference;
@@ -27,6 +30,7 @@ public sealed class GitSnapshot : IDisposable
         SnapshotDirectory = snapshotDirectory;
         this.ownedDirectory = ownedDirectory;
         this.ownershipToken = ownershipToken;
+        this.trackedFiles = trackedFiles;
     }
 
     public string RepositoryRoot { get; }
@@ -36,6 +40,12 @@ public sealed class GitSnapshot : IDisposable
     public string Commit { get; }
 
     public string SnapshotDirectory { get; }
+
+    public void EnsureTrackedFilesUnchanged() =>
+        GitSnapshotProvider.EnsureTrackedFilesUnchanged(SnapshotDirectory, trackedFiles);
+
+    public void RecordExpectedTrackedFileMutation(string relativePath) =>
+        GitSnapshotProvider.RecordExpectedTrackedFileMutation(SnapshotDirectory, trackedFiles, relativePath);
 
     public void Dispose()
     {
@@ -92,6 +102,7 @@ public sealed class GitSnapshotProvider
     private static readonly TimeSpan DefaultOperationTimeout = TimeSpan.FromMinutes(2);
 
     private readonly IProcessRunner processRunner;
+    private readonly GitCommitInspector commitInspector;
     private readonly TimeSpan operationTimeout;
     private readonly string temporaryRoot;
     private readonly GitSnapshotLimits limits;
@@ -126,6 +137,7 @@ public sealed class GitSnapshotProvider
         }
 
         this.processRunner = processRunner;
+        commitInspector = new GitCommitInspector(processRunner, operationTimeout);
         this.operationTimeout = operationTimeout;
         this.temporaryRoot = Path.GetFullPath(temporaryRoot);
         this.limits = limits.Validate();
@@ -162,20 +174,15 @@ public sealed class GitSnapshotProvider
             throw new InvalidOperationException("Git returned a repository root that does not exist.");
         }
 
-        var commitResult = await RunGitAsync(
-            ["rev-parse", "--verify", "--end-of-options", $"{reference}^{{commit}}"],
-            repositoryRoot,
-            $"resolve Git reference '{reference}'",
-            cancellationToken).ConfigureAwait(false);
-        var commit = ParseCommit(commitResult.StandardOutput);
+        var commit = await commitInspector.ResolveCommitAsync(repositoryRoot, reference, cancellationToken)
+            .ConfigureAwait(false);
+        var preflight = await PreflightTreeAsync(repositoryRoot, commit, cancellationToken)
+            .ConfigureAwait(false);
 
-        if (IsWithin(temporaryRoot, repositoryRoot))
-        {
-            throw new InvalidOperationException(
-                "The Git snapshot temporary directory must be outside the current repository.");
-        }
-
+        EnsureTemporaryRootIsSafe(repositoryRoot);
         Directory.CreateDirectory(temporaryRoot);
+        EnsureTemporaryRootIsSafe(repositoryRoot);
+        EnsureMaterializationCapacity(temporaryRoot, preflight);
         var ownedDirectory = Path.Combine(
             temporaryRoot,
             TemporaryDirectoryPrefix + Guid.NewGuid().ToString("N"));
@@ -218,13 +225,15 @@ public sealed class GitSnapshotProvider
             }
 
             File.Delete(archivePath);
+            var trackedFiles = CreateTrackedFileManifest(snapshotDirectory);
             return new GitSnapshot(
                 repositoryRoot,
                 reference,
                 commit,
                 snapshotDirectory,
                 ownedDirectory,
-                ownershipToken);
+                ownershipToken,
+                trackedFiles);
         }
         catch (Exception operationError)
         {
@@ -244,6 +253,110 @@ public sealed class GitSnapshotProvider
         }
     }
 
+    private async Task<GitTreePreflight> PreflightTreeAsync(
+        string repositoryRoot,
+        string commit,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunGitAsync(
+            [
+                "ls-tree",
+                "-r",
+                "--full-tree",
+                "--format=%(objectmode) %(objecttype) %(objectsize)",
+                commit,
+            ],
+            repositoryRoot,
+            $"inspect Git commit '{commit}' before archiving",
+            cancellationToken).ConfigureAwait(false);
+        long expandedBytes = 0;
+        long estimatedArchiveBytes = 1024;
+        var entries = 0;
+        try
+        {
+            foreach (var entry in result.StandardOutput.Split(
+                ['\r', '\n'],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                entries = checked(entries + 1);
+                if (entries > limits.MaximumEntries)
+                {
+                    throw new InvalidDataException(
+                        $"The Git snapshot contains more than the configured {limits.MaximumEntries} entries.");
+                }
+
+                var metadata = entry.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (metadata.Length != 3)
+                {
+                    throw new InvalidDataException("Git returned malformed tracked-tree metadata.");
+                }
+
+                var size = metadata[2] == "-"
+                    ? 0L
+                    : long.TryParse(
+                        metadata[2],
+                        System.Globalization.NumberStyles.None,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out var parsed) && parsed >= 0
+                        ? parsed
+                        : throw new InvalidDataException("Git returned an invalid tracked blob size.");
+                if (size > limits.MaximumSingleFileBytes)
+                {
+                    throw new InvalidDataException(
+                        $"A tracked Git blob is {size} bytes, exceeding the configured {limits.MaximumSingleFileBytes}-byte single-file limit.");
+                }
+
+                expandedBytes = checked(expandedBytes + size);
+                if (expandedBytes > limits.MaximumExpandedBytes)
+                {
+                    throw new InvalidDataException(
+                        $"The Git snapshot expands beyond the configured {limits.MaximumExpandedBytes}-byte limit.");
+                }
+
+                var roundedSize = checked((size + 511) / 512 * 512);
+                estimatedArchiveBytes = checked(estimatedArchiveBytes + roundedSize + 8192);
+                if (estimatedArchiveBytes > limits.MaximumArchiveBytes)
+                {
+                    throw new InvalidDataException(
+                        $"The estimated Git snapshot archive exceeds the configured {limits.MaximumArchiveBytes}-byte limit.");
+                }
+            }
+        }
+        catch (OverflowException exception)
+        {
+            throw new InvalidDataException("The Git snapshot size estimate overflowed its safety bounds.", exception);
+        }
+
+        return new GitTreePreflight(expandedBytes, estimatedArchiveBytes);
+    }
+
+    private void EnsureMaterializationCapacity(string destinationRoot, GitTreePreflight preflight)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(destinationRoot));
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return;
+            }
+
+            var required = checked(
+                preflight.EstimatedArchiveBytes +
+                preflight.ExpandedBytes +
+                limits.MinimumFreeBytesAfterExtraction);
+            var available = new DriveInfo(root).AvailableFreeSpace;
+            if (available < required)
+            {
+                throw new IOException(
+                    $"The Git snapshot needs at least {required} free bytes before materialization, but only {available} are available.");
+            }
+        }
+        catch (OverflowException exception)
+        {
+            throw new IOException("Could not validate free space for the Git snapshot.", exception);
+        }
+    }
+
     internal static void ValidateReference(string reference)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reference);
@@ -255,6 +368,100 @@ public sealed class GitSnapshotProvider
         {
             throw new ArgumentException("The Git reference is not a safe revision expression.", nameof(reference));
         }
+    }
+
+    internal static Dictionary<string, GitTrackedFileFingerprint> CreateTrackedFileManifest(
+        string snapshotDirectory)
+    {
+        var root = Path.GetFullPath(snapshotDirectory);
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparer.OrdinalIgnoreCase
+            : StringComparer.Ordinal;
+        var manifest = new Dictionary<string, GitTrackedFileFingerprint>(comparison);
+        foreach (var path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+        {
+            var info = new FileInfo(path);
+            if (info.Attributes.HasFlag(FileAttributes.ReparsePoint))
+            {
+                throw new InvalidDataException(
+                    "The materialized Git snapshot unexpectedly contains a filesystem link.");
+            }
+
+            var relative = Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var hash = SHA256.HashData(stream);
+            UnixFileMode? mode = OperatingSystem.IsWindows() ? null : File.GetUnixFileMode(path);
+            manifest.Add(relative, new GitTrackedFileFingerprint(info.Length, hash, mode));
+        }
+
+        return manifest;
+    }
+
+    internal static void EnsureTrackedFilesUnchanged(
+        string snapshotDirectory,
+        IReadOnlyDictionary<string, GitTrackedFileFingerprint> trackedFiles)
+    {
+        var root = Path.GetFullPath(snapshotDirectory);
+        foreach (var (relative, expected) in trackedFiles)
+        {
+            var path = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar)));
+            if (!IsWithin(path, root) || !File.Exists(path))
+            {
+                throw new InvalidOperationException(
+                    $"Tracked snapshot file '{relative}' was removed or changed type during verified execution.");
+            }
+
+            var info = new FileInfo(path);
+            if (info.Attributes.HasFlag(FileAttributes.ReparsePoint) || info.Length != expected.Length)
+            {
+                throw new InvalidOperationException(
+                    $"Tracked snapshot file '{relative}' changed during verified execution.");
+            }
+
+            if (!OperatingSystem.IsWindows() && File.GetUnixFileMode(path) != expected.UnixMode)
+            {
+                throw new InvalidOperationException(
+                    $"Tracked snapshot file '{relative}' changed mode during verified execution.");
+            }
+
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            var observed = SHA256.HashData(stream);
+            if (!CryptographicOperations.FixedTimeEquals(observed, expected.Sha256))
+            {
+                throw new InvalidOperationException(
+                    $"Tracked snapshot file '{relative}' changed content during verified execution.");
+            }
+        }
+    }
+
+    internal static void RecordExpectedTrackedFileMutation(
+        string snapshotDirectory,
+        IDictionary<string, GitTrackedFileFingerprint> trackedFiles,
+        string relativePath)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(relativePath);
+        var portable = relativePath.Replace('\\', '/');
+        if (!trackedFiles.ContainsKey(portable))
+        {
+            throw new InvalidOperationException(
+                "Dependency Time Machine may mutate only a file tracked by the immutable source commit.");
+        }
+
+        var root = Path.GetFullPath(snapshotDirectory);
+        var path = Path.GetFullPath(Path.Combine(root, portable.Replace('/', Path.DirectorySeparatorChar)));
+        if (!IsWithin(path, root) || !File.Exists(path) ||
+            File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+        {
+            throw new InvalidOperationException(
+                "The authorized dependency declaration mutation left its trusted snapshot boundary.");
+        }
+
+        var info = new FileInfo(path);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        trackedFiles[portable] = new GitTrackedFileFingerprint(
+            info.Length,
+            SHA256.HashData(stream),
+            OperatingSystem.IsWindows() ? null : File.GetUnixFileMode(path));
     }
 
     internal static async Task ExtractTrackedFilesAsync(
@@ -656,6 +863,12 @@ public sealed class GitSnapshotProvider
                 arguments,
                 workingDirectory,
                 timeoutSource.Token).ConfigureAwait(false);
+            if (result.StandardOutputTruncated || result.StandardErrorTruncated)
+            {
+                throw new InvalidOperationException(
+                    $"Could not {operation}; Git output exceeded the subprocess safety limit.");
+            }
+
             if (result.ExitCode != 0)
             {
                 var detail = ProcessRunner.RedactSecrets(string.IsNullOrWhiteSpace(result.StandardError)
@@ -686,18 +899,103 @@ public sealed class GitSnapshotProvider
         return value;
     }
 
-    private static string ParseCommit(string output)
+    private void EnsureTemporaryRootIsSafe(string repositoryRoot)
     {
-        var commit = ParseSingleLine(output, "commit identifier");
-        if ((commit.Length is not 40 and not 64) || !commit.All(Uri.IsHexDigit))
+        if (File.Exists(temporaryRoot))
         {
-            throw new InvalidOperationException("Git returned an invalid commit identifier.");
+            throw new InvalidOperationException(
+                "The Git snapshot temporary root must be a directory.");
         }
 
-        return commit.ToLowerInvariant();
+        if (Directory.Exists(temporaryRoot))
+        {
+            var rootInfo = new DirectoryInfo(temporaryRoot);
+            if (rootInfo.Attributes.HasFlag(FileAttributes.ReparsePoint) || rootInfo.LinkTarget is not null)
+            {
+                throw new InvalidOperationException(
+                    "The Git snapshot temporary root cannot be a symbolic link, junction, or reparse point.");
+            }
+        }
+
+        string physicalTemporaryRoot;
+        string physicalRepositoryRoot;
+        try
+        {
+            physicalTemporaryRoot = ResolvePhysicalDirectoryPath(temporaryRoot, requireExisting: false);
+            physicalRepositoryRoot = ResolvePhysicalDirectoryPath(repositoryRoot, requireExisting: true);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException(
+                "Could not validate the physical Git snapshot temporary root.",
+                exception);
+        }
+
+        if (IsWithin(temporaryRoot, repositoryRoot) ||
+            IsWithin(physicalTemporaryRoot, physicalRepositoryRoot))
+        {
+            throw new InvalidOperationException(
+                "The Git snapshot temporary directory must be physically outside the current repository.");
+        }
     }
 
-    private static bool IsWithin(string candidate, string parent)
+    internal static string ResolvePhysicalDirectoryPath(string path, bool requireExisting)
+    {
+        var fullPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        var root = Path.GetPathRoot(fullPath);
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            throw new InvalidOperationException("The directory path does not have a filesystem root.");
+        }
+
+        var segments = Path.GetRelativePath(root, fullPath)
+            .Split(
+                [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+                StringSplitOptions.RemoveEmptyEntries)
+            .Where(segment => segment != ".")
+            .ToArray();
+        var current = root;
+        for (var index = 0; index < segments.Length; index++)
+        {
+            var candidate = Path.Combine(current, segments[index]);
+            var entry = new DirectoryInfo(candidate);
+            if (!entry.Exists)
+            {
+                if (requireExisting)
+                {
+                    throw new InvalidOperationException("The directory path no longer exists.");
+                }
+
+                for (; index < segments.Length; index++)
+                {
+                    current = Path.Combine(current, segments[index]);
+                }
+
+                return Path.GetFullPath(current);
+            }
+
+            if (entry.Attributes.HasFlag(FileAttributes.ReparsePoint) || entry.LinkTarget is not null)
+            {
+                var resolved = entry.ResolveLinkTarget(returnFinalTarget: true)
+                    ?? throw new InvalidOperationException(
+                        "The directory path contains an invalid symbolic-link or junction target.");
+                if (!resolved.Attributes.HasFlag(FileAttributes.Directory))
+                {
+                    throw new InvalidOperationException(
+                        "The directory path contains a symbolic link that does not resolve to a directory.");
+                }
+
+                current = Path.GetFullPath(resolved.FullName);
+                continue;
+            }
+
+            current = candidate;
+        }
+
+        return Path.GetFullPath(current);
+    }
+
+    internal static bool IsWithin(string candidate, string parent)
     {
         var normalizedCandidate = Path.GetFullPath(candidate);
         var normalizedParent = Path.GetFullPath(parent);
@@ -714,4 +1012,11 @@ public sealed class GitSnapshotProvider
             : normalizedParent + Path.DirectorySeparatorChar;
         return normalizedCandidate.StartsWith(parentPrefix, comparison);
     }
+
+    private sealed record GitTreePreflight(long ExpandedBytes, long EstimatedArchiveBytes);
 }
+
+internal sealed record GitTrackedFileFingerprint(
+    long Length,
+    byte[] Sha256,
+    UnixFileMode? UnixMode);

@@ -1,6 +1,6 @@
 # Dependency Impact Gate
 
-PackageMedic 0.5 turns a Git dependency diff into a reviewable impact decision. It answers three questions that a flat package list cannot:
+PackageMedic 0.6 turns a Git dependency diff into a reviewable impact decision. It answers three questions that a flat package list cannot:
 
 1. Which direct dependency caused each changed transitive package?
 2. How large is that direct dependency's blast radius?
@@ -105,7 +105,7 @@ Auto mode selects the pull request base commit for an unprivileged `pull_request
   with:
     fetch-depth: 0
 
-- uses: GonzMeza/package-medic@v0.5.0
+- uses: GonzMeza/package-medic@v0.6.0
   with:
     mode: auto
     config: .packagemedic.json

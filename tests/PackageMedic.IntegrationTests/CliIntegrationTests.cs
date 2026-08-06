@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using PackageMedic.Cli;
 using PackageMedic.Core;
@@ -8,6 +10,70 @@ namespace PackageMedic.IntegrationTests;
 
 public sealed class CliIntegrationTests
 {
+    [Fact]
+    public void VerificationOptionsAreExplicitOrderedAndScopedToDiffOrSimulation()
+    {
+        var diff = CliOptions.Parse([
+            "diff", "HEAD~1", ".", "--verify", "build", "--build-timeout", "600",
+            "--verification-configuration", "Continuous_Integration",
+        ]);
+        var simulation = CliOptions.Parse([
+            "simulate", "Example.Package", "--to", "2.0.0", "--verify=test",
+            "--build-timeout=600", "--test-timeout", "1200",
+        ]);
+
+        Assert.Equal(VerificationLevel.Build, diff.Verify);
+        Assert.Equal(600, diff.BuildTimeoutSeconds);
+        Assert.Equal("Continuous_Integration", diff.VerificationConfiguration);
+        Assert.Equal(VerificationLevel.Test, simulation.Verify);
+        Assert.Equal(1200, simulation.TestTimeoutSeconds);
+        Assert.Throws<UsageException>(() => CliOptions.Parse(["doctor", ".", "--verify", "build"]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "diff", "HEAD", ".", "--verify", "build", "--no-restore",
+        ]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "diff", "HEAD", ".", "--verification-configuration", "Release",
+        ]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "diff", "HEAD", ".", "--verify", "restore", "--build-timeout", "60",
+        ]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "simulate", "Example.Package", "--to", "2.0.0", "--verify", "build",
+            "--test-timeout", "60",
+        ]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "diff", "HEAD", ".", "--verify", "build", "--verify", "test",
+        ]));
+        var provenance = CliOptions.Parse([
+            "diff", "HEAD~1", ".", "--verify", "test", "--provenance-output", "evidence.intoto.json",
+        ]);
+        Assert.Equal("evidence.intoto.json", provenance.ProvenanceOutputPath);
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "diff", "HEAD", ".", "--provenance-output", "evidence.intoto.json",
+        ]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "doctor", ".", "--provenance-output", "evidence.intoto.json",
+        ]));
+    }
+
+    [Fact]
+    public void ParsesCycloneDxOutputForSupportedAnalysisCommandsOnly()
+    {
+        var doctor = CliOptions.Parse(["doctor", ".", "--sbom-output", "artifacts/bom.cdx.json"]);
+        var diff = CliOptions.Parse(["diff", "HEAD", ".", "--sbom-output=artifacts/diff.cdx.json"]);
+        var sbom = CliOptions.Parse(["sbom", ".", "--output", "artifacts/standalone.cdx.json"]);
+
+        Assert.Equal("artifacts/bom.cdx.json", doctor.SbomOutputPath);
+        Assert.Equal("artifacts/diff.cdx.json", diff.SbomOutputPath);
+        Assert.Equal(CliCommand.Sbom, sbom.Command);
+        Assert.Null(sbom.OutputPath);
+        Assert.Equal("artifacts/standalone.cdx.json", sbom.SbomOutputPath);
+        Assert.Throws<UsageException>(() => CliOptions.Parse(["sbom", "."]));
+        Assert.Throws<UsageException>(() => CliOptions.Parse([
+            "simulate", "Example.Package", "--to", "2.0.0", "--sbom-output", "candidate.cdx.json",
+        ]));
+    }
+
     [Fact]
     public void SimulationOptionsRequireAnExactCandidateAndRejectIncompatibleModes()
     {
@@ -75,7 +141,7 @@ public sealed class CliIntegrationTests
             RestoreProcessFailureKind.Rejected);
         var unavailable = new RestoreExecutionResult(
             [RestoreDiagnostic("NU1301")],
-            ["The service index could not be loaded."],
+            ["NU1301: The service index could not be loaded."],
             RestoreProcessFailureKind.Rejected);
         var unknown = new RestoreExecutionResult(
             [],
@@ -83,7 +149,7 @@ public sealed class CliIntegrationTests
             RestoreProcessFailureKind.Rejected);
         var missingVersion = new RestoreExecutionResult(
             [RestoreDiagnostic("NU1102")],
-            ["The requested version is absent."],
+            ["NU1102: The requested version is absent."],
             RestoreProcessFailureKind.Rejected);
 
         var authenticationKind = Program.ClassifySimulationRestoreFailure(
@@ -399,6 +465,72 @@ public sealed class CliIntegrationTests
     }
 
     [Fact]
+    public async Task OneAnalysisCanWriteAValidCycloneDxSbom()
+    {
+        var directory = Directory.CreateTempSubdirectory("PackageMedic.CycloneDxOutput.");
+        try
+        {
+            var sbomPath = Path.Combine(directory.FullName, "bom.cdx.json");
+            var result = await RunAsync(
+                "doctor",
+                Fixture("version-drift"),
+                "--no-restore",
+                "--sbom-output",
+                sbomPath,
+                "--fail-on",
+                "none",
+                "--verbosity",
+                "quiet");
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.True(File.Exists(sbomPath));
+            using var sbom = JsonDocument.Parse(
+                await File.ReadAllTextAsync(sbomPath, TestContext.Current.CancellationToken));
+            Assert.Equal("CycloneDX", sbom.RootElement.GetProperty("bomFormat").GetString());
+            Assert.Equal("1.7", sbom.RootElement.GetProperty("specVersion").GetString());
+            Assert.NotEmpty(sbom.RootElement.GetProperty("components").EnumerateArray());
+            Assert.Contains(
+                sbom.RootElement.GetProperty("metadata").GetProperty("properties").EnumerateArray(),
+                property => property.GetProperty("name").GetString() == "packagemedic:completeness" &&
+                    property.GetProperty("value").GetString() == "incomplete");
+            Assert.Empty(Directory.EnumerateFiles(directory.FullName, "*.tmp"));
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task SbomCommandWritesOnlyTheRequestedCycloneDxDocument()
+    {
+        var directory = Directory.CreateTempSubdirectory("PackageMedic.SbomCommand.");
+        try
+        {
+            var sbomPath = Path.Combine(directory.FullName, "standalone.cdx.json");
+            var result = await RunAsync(
+                "sbom",
+                Fixture("version-drift"),
+                "--no-restore",
+                "--output",
+                sbomPath,
+                "--verbosity",
+                "quiet");
+
+            Assert.Equal(0, result.ExitCode);
+            Assert.Equal(string.Empty, result.Output);
+            Assert.Equal(string.Empty, result.Error);
+            using var sbom = JsonDocument.Parse(
+                await File.ReadAllTextAsync(sbomPath, TestContext.Current.CancellationToken));
+            Assert.Equal("CycloneDX", sbom.RootElement.GetProperty("bomFormat").GetString());
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task OutputPathsMustBeDifferent()
     {
         var reportPath = Path.GetTempFileName();
@@ -449,6 +581,7 @@ public sealed class CliIntegrationTests
     [Theory]
     [InlineData("--output=")]
     [InlineData("--sarif-output=")]
+    [InlineData("--sbom-output=")]
     public async Task EmptyOutputPathIsAUsageError(string option)
     {
         var result = await RunAsync("doctor", option);
@@ -674,13 +807,243 @@ public sealed class CliIntegrationTests
                 "diff", "HEAD", repository.FullName, "--format", "json",
                 "--fail-on", "none", "--verbosity", "quiet");
 
-            Assert.Equal(1, result.ExitCode);
+            Assert.True(
+                result.ExitCode == 1,
+                $"diff failed with exit code {result.ExitCode}: {result.Error}\n{result.Output}");
             using var json = JsonDocument.Parse(result.Output);
             var impact = json.RootElement.GetProperty("diff").GetProperty("impact");
             Assert.Equal(1, impact.GetProperty("summary").GetProperty("contentChanges").GetInt32());
             Assert.Contains(
                 impact.GetProperty("violations").EnumerateArray(),
                 violation => violation.GetProperty("code").GetString() == "PMI010");
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
+    [Fact]
+    public async Task VerifiedDiffRejectsAnIntroducedBuildFailureWithoutWritingTheCheckout()
+    {
+        var repository = Directory.CreateTempSubdirectory("PackageMedic.VerifiedDiff.");
+        var provenancePath = Path.Combine(
+            Path.GetTempPath(),
+            $"PackageMedic.VerifiedDiff.{Guid.NewGuid():N}.intoto.json");
+        try
+        {
+            var project = Path.Combine(repository.FullName, "App.csproj");
+            var source = Path.Combine(repository.FullName, "Program.cs");
+            const string configuration = "{\"schemaVersion\":1,\"failOn\":\"none\"}";
+            await File.WriteAllTextAsync(
+                project,
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net8.0</TargetFramework></PropertyGroup></Project>",
+                TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                source,
+                "System.Console.WriteLine(\"baseline builds\");",
+                TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(repository.FullName, ".packagemedic.json"),
+                configuration,
+                TestContext.Current.CancellationToken);
+            await RunGitAsync(repository.FullName, "init");
+            await RunGitAsync(repository.FullName, "config", "user.name", "PackageMedic Tests");
+            await RunGitAsync(repository.FullName, "config", "user.email", "packagemedic@example.invalid");
+            await RunGitAsync(repository.FullName, "add", ".");
+            await RunGitAsync(repository.FullName, "commit", "-m", "buildable baseline");
+
+            await File.WriteAllTextAsync(
+                source,
+                "this is not valid C#;",
+                TestContext.Current.CancellationToken);
+            await RunGitAsync(repository.FullName, "add", "Program.cs");
+            await RunGitAsync(repository.FullName, "commit", "-m", "broken candidate");
+
+            var result = await RunAsync(
+                "diff",
+                "HEAD~1",
+                repository.FullName,
+                "--verify",
+                "build",
+                "--format",
+                "json",
+                "--provenance-output",
+                provenancePath,
+                "--fail-on",
+                "none",
+                "--verbosity",
+                "quiet");
+
+            Assert.True(
+                result.ExitCode == 1,
+                $"verified diff returned {result.ExitCode}: {result.Error}\n{result.Output}");
+            using var json = JsonDocument.Parse(result.Output);
+            var diff = json.RootElement.GetProperty("diff");
+            Assert.Equal(AnalysisDiffReport.CurrentSchemaVersion, diff.GetProperty("schemaVersion").GetInt32());
+            var verification = diff.GetProperty("verification");
+            Assert.Equal("build", verification.GetProperty("level").GetString());
+            Assert.Equal(
+                "passed",
+                verification.GetProperty("baseline").GetProperty("build").GetProperty("stage").GetProperty("status").GetString());
+            Assert.Equal(
+                "failed",
+                verification.GetProperty("candidate").GetProperty("build").GetProperty("stage").GetProperty("status").GetString());
+            Assert.Equal("reject", verification.GetProperty("decision").GetProperty("verdict").GetString());
+            Assert.Equal(
+                "buildFailed",
+                verification.GetProperty("decision").GetProperty("failureKind").GetString());
+            Assert.True(File.Exists(provenancePath));
+            using var provenance = JsonDocument.Parse(
+                await File.ReadAllTextAsync(provenancePath, TestContext.Current.CancellationToken));
+            Assert.Equal(
+                InTotoEvidenceSerializer.StatementType,
+                provenance.RootElement.GetProperty("_type").GetString());
+            Assert.Matches(
+                "^[0-9a-f]{40,64}$",
+                provenance.RootElement
+                    .GetProperty("subject")[0]
+                    .GetProperty("digest")
+                    .GetProperty("gitCommit")
+                    .GetString());
+            var predicate = provenance.RootElement.GetProperty("predicate");
+            Assert.Equal("build", predicate.GetProperty("verification").GetProperty("level").GetString());
+            Assert.Equal("reject", predicate.GetProperty("verification").GetProperty("status").GetString());
+            Assert.Equal("complete", predicate.GetProperty("verification").GetProperty("completeness").GetString());
+            Assert.Equal("sha256", predicate.GetProperty("configuration").GetProperty("state").GetString());
+            Assert.Equal(
+                Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(configuration))).ToLowerInvariant(),
+                predicate.GetProperty("configuration").GetProperty("sha256").GetString());
+            Assert.Matches(
+                "^[0-9a-f]{64}$",
+                predicate.GetProperty("sbom").GetProperty("digest").GetString());
+            Assert.False(Directory.Exists(Path.Combine(repository.FullName, "bin")));
+            Assert.False(Directory.Exists(Path.Combine(repository.FullName, "obj")));
+        }
+        finally
+        {
+            if (File.Exists(provenancePath))
+            {
+                File.Delete(provenancePath);
+            }
+
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
+    [Fact]
+    public async Task VerifiedDiffRunsNativeMicrosoftTestingPlatformWithDotNet10()
+    {
+        var requireNativeMtp = string.Equals(
+            Environment.GetEnvironmentVariable("PACKAGEMEDIC_REQUIRE_NATIVE_MTP_E2E"),
+            "true",
+            StringComparison.OrdinalIgnoreCase);
+        var sdkVersion = await GetDotNetVersionAsync();
+        if (sdkVersion.Major < 10)
+        {
+            Assert.False(
+                requireNativeMtp,
+                $"Native MTP E2E requires .NET 10 or newer, but dotnet resolved to {sdkVersion}.");
+            return;
+        }
+
+        var repository = Directory.CreateTempSubdirectory("PackageMedic.NativeMtp.");
+        try
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(repository.FullName, "global.json"),
+                """
+                {
+                  "test": {
+                    "runner": "Microsoft.Testing.Platform"
+                  }
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(repository.FullName, "NuGet.Config"),
+                """
+                <configuration>
+                  <packageSources>
+                    <clear />
+                    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+                  </packageSources>
+                </configuration>
+                """,
+                TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(repository.FullName, "NativeMtp.Tests.csproj"),
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net10.0</TargetFramework>
+                    <OutputType>Exe</OutputType>
+                    <IsPackable>false</IsPackable>
+                    <IsTestProject>true</IsTestProject>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
+                    <PackageReference Include="Microsoft.Testing.Extensions.TrxReport" Version="1.9.1" />
+                    <PackageReference Include="xunit.v3" Version="3.2.2" />
+                  </ItemGroup>
+                </Project>
+                """,
+                TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(
+                Path.Combine(repository.FullName, "SmokeTests.cs"),
+                """
+                using Xunit;
+
+                public sealed class SmokeTests
+                {
+                    [Fact]
+                    public void Passes() => Assert.True(true);
+                }
+                """,
+                TestContext.Current.CancellationToken);
+            await RunGitAsync(repository.FullName, "init");
+            await RunGitAsync(repository.FullName, "config", "user.name", "PackageMedic Tests");
+            await RunGitAsync(repository.FullName, "config", "user.email", "packagemedic@example.invalid");
+            await RunGitAsync(repository.FullName, "add", ".");
+            await RunGitAsync(repository.FullName, "commit", "-m", "native MTP fixture");
+
+            var result = await RunAsync(
+                "diff",
+                "HEAD",
+                repository.FullName,
+                "--verify",
+                "test",
+                "--verification-configuration",
+                "Release",
+                "--build-timeout",
+                "300",
+                "--test-timeout",
+                "300",
+                "--fail-on",
+                "none",
+                "--format",
+                "json",
+                "--verbosity",
+                "quiet");
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"native MTP verified diff returned {result.ExitCode}: {result.Error}\n{result.Output}");
+            using var report = JsonDocument.Parse(result.Output);
+            var verification = report.RootElement.GetProperty("diff").GetProperty("verification");
+            Assert.Equal("test", verification.GetProperty("level").GetString());
+            Assert.Equal("noChange", verification.GetProperty("decision").GetProperty("verdict").GetString());
+            foreach (var side in new[] { "baseline", "candidate" })
+            {
+                var tests = verification.GetProperty(side).GetProperty("tests");
+                Assert.Equal("passed", tests.GetProperty("stage").GetProperty("status").GetString());
+                Assert.Equal(1, tests.GetProperty("total").GetInt32());
+                Assert.Equal(1, tests.GetProperty("passed").GetInt32());
+                Assert.Equal(0, tests.GetProperty("failed").GetInt32());
+            }
+
+            Assert.False(Directory.Exists(Path.Combine(repository.FullName, "bin")));
+            Assert.False(Directory.Exists(Path.Combine(repository.FullName, "obj")));
         }
         finally
         {
@@ -938,7 +1301,9 @@ public sealed class CliIntegrationTests
                 "simulate", "Example.Package", "--to", "9.9.9", project,
                 "--format", "json", "--fail-on", "none", "--verbosity", "quiet");
 
-            Assert.Equal(1, result.ExitCode);
+            Assert.True(
+                result.ExitCode == 1,
+                $"missing-candidate simulation returned {result.ExitCode}: {result.Error}{Environment.NewLine}{result.Output}");
             using var json = JsonDocument.Parse(result.Output);
             Assert.True(json.RootElement.GetProperty("isComplete").GetBoolean());
             Assert.Equal("reject", json.RootElement.GetProperty("verdict").GetString());
@@ -951,6 +1316,48 @@ public sealed class CliIntegrationTests
                 "Version=\"1.0.0\"",
                 await File.ReadAllTextAsync(project, TestContext.Current.CancellationToken),
                 StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteTemporaryRepository(repository);
+        }
+    }
+
+    [Fact]
+    public async Task SimulationCanVerifyBuildsInIndependentSnapshots()
+    {
+        var (repository, project) = await CreateSimulationRepositoryAsync("1.0.0", "2.0.0");
+        try
+        {
+            var result = await RunAsync(
+                "simulate",
+                "Example.Package",
+                "--to",
+                "2.0.0",
+                project,
+                "--verify",
+                "build",
+                "--format",
+                "json",
+                "--fail-on",
+                "none",
+                "--verbosity",
+                "quiet");
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"verified simulation returned {result.ExitCode}: {result.Error}\n{result.Output}");
+            using var json = JsonDocument.Parse(result.Output);
+            var root = json.RootElement;
+            Assert.Equal(DependencySimulationReport.CurrentSchemaVersion, root.GetProperty("schemaVersion").GetInt32());
+            Assert.Equal("buildVerified", root.GetProperty("verification").GetProperty("evidenceLevel").GetString());
+            Assert.Equal("passed", root.GetProperty("verification").GetProperty("build").GetString());
+            var executed = root.GetProperty("verification").GetProperty("executed");
+            Assert.Equal("passed", executed.GetProperty("baseline").GetProperty("build").GetProperty("stage").GetProperty("status").GetString());
+            Assert.Equal("passed", executed.GetProperty("candidate").GetProperty("build").GetProperty("stage").GetProperty("status").GetString());
+            Assert.Equal("pass", executed.GetProperty("decision").GetProperty("verdict").GetString());
+            Assert.False(Directory.Exists(Path.Combine(repository.FullName, "bin")));
+            Assert.False(Directory.Exists(Path.Combine(repository.FullName, "obj")));
         }
         finally
         {
@@ -1381,6 +1788,27 @@ public sealed class CliIntegrationTests
         Assert.True(
             process.ExitCode == 0,
             $"git {string.Join(' ', arguments)} failed: {await standardError} {await standardOutput}");
+    }
+
+    private static async Task<Version> GetDotNetVersionAsync()
+    {
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo("dotnet", "--version")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            },
+        };
+        process.Start();
+        var output = await process.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
+        var error = await process.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
+        await process.WaitForExitAsync(TestContext.Current.CancellationToken);
+        Assert.True(process.ExitCode == 0, $"dotnet --version failed: {error}");
+        Assert.True(Version.TryParse(output.Trim(), out var version), $"Invalid dotnet version: {output}");
+        return version!;
     }
 
     private static async Task RunDotNetAsync(string workingDirectory, params string[] arguments)

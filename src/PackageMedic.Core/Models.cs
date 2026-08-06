@@ -61,7 +61,19 @@ public sealed record AnalysisResult(
     public IReadOnlyList<PackageDependencyPath> DependencyPaths { get; init; } = [];
 }
 
-public sealed record AnalysisOutcome(AnalysisResult Result, bool HasOperationalError);
+public sealed record AnalysisOutcome(AnalysisResult Result, bool HasOperationalError)
+{
+    /// <summary>
+    /// Retains the bounded discovery and MSBuild metadata from this analysis so a later
+    /// verification stage can build a plan without evaluating repository code twice.
+    /// These values are execution context and are not serialized in the scan report.
+    /// </summary>
+    public DiscoveryResult? Discovery { get; init; }
+
+    public IReadOnlyList<EvaluatedProject> EvaluatedProjects { get; init; } = [];
+
+    public RestoreExecutionResult? Restore { get; init; }
+}
 
 public sealed record DiscoveryResult(
     string Target,

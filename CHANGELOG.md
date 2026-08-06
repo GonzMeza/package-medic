@@ -6,7 +6,42 @@ All notable changes to PackageMedic are documented in this file.
 
 No changes yet.
 
-## [0.5.0] - Unreleased
+## [0.6.0] - 2026-08-06
+
+PackageMedic 0.6 turns dependency comparison into an opt-in verified experiment while preserving the read-only checkout boundary.
+
+### Added
+
+- Ordered `--verify restore|build|test` execution for `diff` and Dependency Time Machine; higher levels imply every preceding stage.
+- Independently restored immutable baseline/candidate snapshots with generated `dotnet build --no-restore` and bounded `dotnet test --no-build --no-restore` execution.
+- Conservative comparative verdicts: candidate-only deterministic build/test failures reject, while unusable baselines, missing evidence, timeouts, and operational failures remain incomplete.
+- VSTest and Microsoft Testing Platform planning with bounded streaming TRX parsing, stable failed-test identities, and explicit missing-reporter evidence.
+- Diff schema 3 and simulation schema 2 structured verification evidence.
+- Deterministic CycloneDX 1.7 output through `sbom` and `--sbom-output`; current composition is explicitly marked incomplete rather than inventing unobserved dependency edges.
+- `--provenance-output` for verified Git diffs, producing deterministic unsigned in-toto Statement v1 analysis evidence bound to the candidate commit, baseline commit, comparison-report digest, configuration fingerprint, verification verdict, and an SBOM digest when a complete resolved graph exists.
+- GitHub Action verification controls, job-summary tables, regression/test outputs, self-hosted execution authorization, and verified-diff provenance artifacts.
+- Published analysis-attestation JSON Schema and a v0.6 architecture/security boundary.
+
+### Changed
+
+- Verified Git diffs require a clean current worktree and compare two resolved immutable commits; simulation materializes two snapshots of the same immutable `HEAD`.
+- Baseline and candidate restores, builds, tests, caches, homes, temporary files, and result roots are isolated and never reuse checkout `bin`, `obj`, or TRX state.
+- Restore, MSBuild evaluation, build, and test now share the same explicit verification configuration, preventing cross-configuration evidence.
+- Multi-target restore rejection is deterministic only when every failed target has the same recognized structured cause; mixed or unclassified failures remain incomplete.
+- Pull-request gate configuration comes from the trusted base revision or explicit caller-owned policy, never from the candidate being evaluated.
+- The Action rejects `pull_request_target` in every mode and keeps executable verification disabled unless explicitly selected.
+
+### Safety
+
+- Build targets, analyzers, source generators, test adapters, and tests execute repository-controlled code. Verification is intended for trusted local repositories or ephemeral GitHub-hosted runners and is not an operating-system sandbox.
+- PackageMedic generates fixed argument vectors and never accepts arbitrary build/test shell fragments.
+- Self-hosted build/test verification requires explicit authorization and an independently secured execution boundary.
+- TRX rejects DTDs, external entities, links, path escapes, excessive files/bytes/results, malformed counts, and unowned result roots.
+- Provenance is unsigned PackageMedic analysis evidence, not DSSE, a signature, or SLSA build provenance; signing remains external.
+- CI exercises verified Action restore mode on Windows, Linux, and macOS, runs native Microsoft Testing Platform end to end on .NET 10, and validates generated CycloneDX 1.7 output with the official CycloneDX CLI pinned by SHA-256.
+- Verification disables reusable MSBuild and compiler servers so isolated snapshot files are not retained by background build processes.
+
+## [0.5.0] - 2026-08-05
 
 PackageMedic 0.5 turns the existing read-only graph comparison into pull-request intelligence. Its new dependency Impact Gate explains causal paths and blast radius, enforces source and reproducibility policy, adds official NuGet deprecation data, and lets the GitHub Action select a safe PR comparison automatically without modifying or fetching repository state.
 
@@ -151,4 +186,5 @@ First stable release of the read-only dependency diagnostics workflow.
 [0.1.0]: https://github.com/GonzMeza/package-medic/releases/tag/v0.1.0
 [0.4.0]: https://github.com/GonzMeza/package-medic/compare/v0.1.0...v0.4.0
 [0.5.0]: https://github.com/GonzMeza/package-medic/compare/v0.4.0...v0.5.0
-[Unreleased]: https://github.com/GonzMeza/package-medic/compare/v0.5.0...HEAD
+[0.6.0]: https://github.com/GonzMeza/package-medic/compare/v0.5.0...v0.6.0
+[Unreleased]: https://github.com/GonzMeza/package-medic/compare/v0.6.0...HEAD

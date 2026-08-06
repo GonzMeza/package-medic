@@ -1,4 +1,4 @@
-![PackageMedic logo](https://raw.githubusercontent.com/GonzMeza/package-medic/v0.5.0/assets/brand/packagemedic-logo.png)
+![PackageMedic logo](https://raw.githubusercontent.com/GonzMeza/package-medic/v0.6.0/assets/brand/packagemedic-logo.png)
 
 # PackageMedic
 
@@ -8,11 +8,11 @@
 [![NuGet downloads](https://img.shields.io/nuget/dt/PackageMedic.Tool.svg)](https://www.nuget.org/packages/PackageMedic.Tool)
 [![CI status](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml/badge.svg)](https://github.com/GonzMeza/package-medic/actions/workflows/ci.yml)
 [![MIT license](https://img.shields.io/github/license/GonzMeza/package-medic)](LICENSE)
-[![Stable status](https://img.shields.io/badge/status-stable%200.5.0-brightgreen)](https://github.com/GonzMeza/package-medic/releases)
+[![Stable status](https://img.shields.io/badge/status-stable%200.6.0-brightgreen)](https://github.com/GonzMeza/package-medic/releases)
 
-PackageMedic 0.5 is the PR-intelligence and dependency-simulation release of the read-only dependency doctor for SDK-style .NET projects. Its Impact Gate explains which direct package caused each transitive change, measures blast radius, checks package-source trust and locked-restore policy, and can stop risky pull requests. Dependency Time Machine restore-validates one exact package candidate in two independent snapshots without editing the checkout. It also adds PM008 deprecation evidence, semantic package and risk deltas, and automatic pull-request comparison to the existing policy, baseline, JSON, SARIF, and GitHub Action workflow.
+PackageMedic 0.6 is the verified-experiments release of the read-only dependency doctor for SDK-style .NET projects. It can compare restore, build, and structured test evidence across independent immutable snapshots; export a deterministic CycloneDX 1.7 NuGet SBOM; and bind conclusive verified diffs to unsigned in-toto analysis evidence. The existing Impact Gate, Dependency Time Machine, PM001-PM008 diagnostics, semantic risk deltas, JSON, SARIF, and GitHub Action remain part of the same workflow.
 
-> **Important:** PackageMedic 0.5 never changes dependency declarations in the checkout. `simulate` mutates only an owned disposable snapshot and verifies restore/graph evidence—not build, tests, runtime compatibility, or safety. Review every result before changing dependencies.
+> **Important:** PackageMedic 0.6 never changes dependency declarations in the checkout. `--verify build|test` is opt-in because restore, builds, analyzers, source generators, adapters, and tests can execute repository-controlled code. Snapshot isolation protects checkout integrity; it is not an operating-system sandbox or a package-safety verdict.
 
 PackageMedic is not affiliated with, maintained by, sponsored by, or endorsed by Microsoft. .NET, NuGet, and related names are trademarks of their respective owners.
 
@@ -32,10 +32,10 @@ Install the latest stable release from NuGet:
 dotnet tool install --global PackageMedic.Tool
 ```
 
-Install PackageMedic 0.5 explicitly:
+Install PackageMedic 0.6 explicitly:
 
 ```console
-dotnet tool install --global PackageMedic.Tool --version 0.5.0
+dotnet tool install --global PackageMedic.Tool --version 0.6.0
 ```
 
 Update an existing installation:
@@ -149,6 +149,18 @@ package-medic simulate Example.Package --to 2.0.0 MySolution.sln --format json
 
 # Explicitly provide and redact only the private-feed variable needed by the simulation
 package-medic simulate Contoso.Package --to 4.2.0 . --credential-env VSS_NUGET_EXTERNAL_FEED_ENDPOINTS
+
+# Verify restore, build, and tests in immutable baseline/candidate snapshots
+package-medic diff origin/main . --verify test --verification-configuration Release
+
+# Verify one Time Machine candidate through build without editing the checkout
+package-medic simulate Example.Package --to 2.0.0 . --verify build
+
+# Export the observed NuGet inventory as deterministic CycloneDX 1.7 JSON
+package-medic sbom . --output artifacts/packagemedic.cdx.json
+
+# Bind a conclusive verified diff to unsigned in-toto analysis evidence
+package-medic diff origin/main . --verify test --provenance-output artifacts/packagemedic.intoto.json
 ```
 
 Restore progress is written to standard error, so standard output remains valid JSON or SARIF. `--output` atomically writes the selected format, while `--sarif-output` can additionally write SARIF from that same in-memory analysis. PackageMedic creates destination directories and never mixes progress into report files.
@@ -159,7 +171,7 @@ Restore progress is written to standard error, so standard output remains valid 
 
 `simulate <package-id> --to <exact-version> [path]` requires a clean Git worktree and one unambiguous literal direct/central version declaration. It materializes two snapshots of the same `HEAD` commit, gives each an isolated NuGet/.NET cache and home, verifies the observed declaration by structure and SHA-256, changes only its version bytes in the candidate snapshot, and compares the independent restores with the same diagnostic and Impact Gate logic as `diff`.
 
-Verdicts are `pass`, `reject`, `noChange`, and `incomplete`. A candidate absent from configured feeds or blocked by `RestoreLockedMode` is a complete rejection/exit `1`; timeout, snapshot, audit, evaluation, or cleanup failures are incomplete/exit `2`. Restore can execute repository-controlled MSBuild logic and contact configured feeds. Build, tests, and runtime compatibility are explicitly not run. See the [complete Dependency Time Machine reference](docs/time-machine.md) and its independent [JSON schema](schemas/packagemedic-simulation.schema.json).
+Verdicts are `pass`, `reject`, `noChange`, and `incomplete`. A candidate absent from configured feeds or blocked by `RestoreLockedMode` is a complete rejection/exit `1`; timeout, snapshot, audit, evaluation, or cleanup failures are incomplete/exit `2`. Restore remains the default evidence level. `--verify build` and `--verify test` opt into the same ordered stage on both snapshots; a candidate-only deterministic failure can reject, while missing or contradictory evidence remains incomplete. Runtime compatibility and package safety are never claimed. See the [complete Dependency Time Machine reference](docs/time-machine.md), [verified-experiment architecture](docs/v0.6-architecture.md), and the independent [JSON schema](schemas/packagemedic-simulation.schema.json).
 
 ## Team policy
 
@@ -233,7 +245,7 @@ Baselines use the same portable fingerprint as SARIF, contain no timestamps, and
 
 ## CI and SARIF
 
-PackageMedic 0.5 maps PM001–PM008 to deterministic SARIF 2.1.0 with repository-relative locations, stable fingerprints, standard baseline states, rule help links, confidence, and original NuGet codes. SARIF can be consumed by GitHub Code Scanning or any compatible CI system.
+PackageMedic 0.6 maps PM001–PM008 to deterministic SARIF 2.1.0 with repository-relative locations, stable fingerprints, standard baseline states, rule help links, confidence, and original NuGet codes. SARIF can be consumed by GitHub Code Scanning or any compatible CI system.
 
 The official GitHub Action installs the PackageMedic version associated with its tag, emits native file annotations, writes a job summary, preserves the CLI exit-code contract, and can upload the SARIF report after the scan.
 
@@ -244,7 +256,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v6
-  - uses: GonzMeza/package-medic@v0.5.0
+  - uses: GonzMeza/package-medic@v0.6.0
     with:
       mode: scan
       path: .
@@ -267,14 +279,15 @@ For pull-request dependency diffs, use the unprivileged `pull_request` event, ch
 - uses: actions/checkout@v6
   with:
     fetch-depth: 0
-- uses: GonzMeza/package-medic@v0.5.0
+- uses: GonzMeza/package-medic@v0.6.0
   with:
     audit: 'true'
     deprecated: 'true'
     fail-on: warning
+    verify: test
 ```
 
-The Action restores both graphs by default. Setting `restore: 'false'` is safe only when usable assets files are tracked for every project in both revisions; otherwise the comparison is marked incomplete and exits with code `2`.
+The Action restores both graphs by default. Setting `restore: 'false'` is safe only when usable assets files are tracked for every project in both revisions; otherwise the comparison is marked incomplete and exits with code `2`. Verified diffs expose `verification-status`, build/test regression flags, candidate test counts, incompleteness, CycloneDX, and unsigned-evidence outputs. Build/test verification is allowed on GitHub-hosted runners; persistent self-hosted runners require explicit `allow-self-hosted-verification: 'true'` acknowledgement and independent hardening.
 
 The PR summary shows the Impact Gate result, dependency-growth counts, source and content changes, maximum blast radius, and each failed policy with its causal package path. Later workflow steps can consume `impact-gate-passed`, `impact-violations`, `impact-added-direct`, `impact-added-transitive`, `impact-max-blast-radius`, `impact-source-changes`, and `impact-content-changes`.
 
@@ -295,7 +308,7 @@ Every diagnostic includes an explanation, evidence, affected project/scope, sour
 
 ## JSON and exit codes
 
-JSON output is stable and camel-cased. Scan reports keep `version`, `target`, `summary`, `diagnostics`, and `analysisErrors`; their independent `schemaVersion` remains `1`. `diff` uses nested schema version `2` for semantic graph and Impact Gate changes. `simulate` has its own schema version `1` with repository, request, mutation, verification, comparison, verdict, rejection, and operational-error boundaries. SARIF remains focused on observed PM001–PM008 findings; hypothetical simulations never emit SARIF. All formats are deterministically ordered and contain no timestamps or temporary paths.
+JSON output is stable and camel-cased. Scan reports keep `version`, `target`, `summary`, `diagnostics`, and `analysisErrors`; their independent `schemaVersion` remains `1`. `diff` uses nested schema version `3` for semantic graph, Impact Gate, and comparative verification evidence. `simulate` uses schema version `2` for its repository, request, mutation, executed verification, comparison, verdict, rejection, and operational-error boundaries. SARIF remains focused on observed PM001–PM008 findings; hypothetical simulations never emit SARIF. CycloneDX and in-toto evidence are separate output contracts. All formats are deterministically ordered and contain no timestamps or temporary paths.
 
 | Exit code | Meaning |
 | --- | --- |
@@ -323,7 +336,7 @@ JSON output is stable and camel-cased. Scan reports keep `version`, `target`, `s
 - `simulate` uses two separately restored snapshots of one clean `HEAD`, validates a SHA-256/XML precondition, preserves declaration bytes outside the version value, and rechecks the original worktree after no-follow cleanup.
 - Every simulation snapshot has independent NuGet/HTTP/plugin caches, CLI home, user-home aliases, app-data, and temporary directories. No private-feed variable is inherited unless named with `--credential-env`, whose value is then treated as a redaction secret.
 - Snapshot isolation protects checkout integrity but is not an OS sandbox: restore/MSBuild still runs with the caller's host permissions and can execute repository-controlled logic or contact configured sources.
-- `clean --dry-run` only lists PM001 candidates. Version 0.5 offers no apply/fix command.
+- `clean --dry-run` only lists PM001 candidates. Version 0.6 offers no apply/fix command.
 
 ## Current limitations
 
@@ -337,7 +350,7 @@ JSON output is stable and camel-cased. Scan reports keep `version`, `target`, `s
 - Deprecation results likewise depend on configured NuGet sources and are only requested with `--deprecated`.
 - `diff --no-restore` cannot reconstruct missing assets from Git; both selected revisions must already contain usable tracked assets files.
 - `simulate` accepts one exact direct/central package version and a clean committed tree. It deliberately rejects dynamic, conditional, ambiguous, transitive-only, external, submodule/LFS-missing, untracked/generated, or Git export-transformed dependency inputs.
-- A passing simulation proves only observed restore and dependency-graph policy; it does not prove build, test, API, binary, or runtime compatibility.
+- A default passing simulation proves only observed restore and dependency-graph policy. Requested build/test stages add comparative evidence but still do not prove API, binary, runtime compatibility, or package safety.
 - No automatic fixes, IDE extension, or desktop UI is included yet.
 
 ## Repository layout
@@ -350,15 +363,15 @@ tests/PackageMedic.IntegrationTests/ CLI/fixture and exit-code tests
 fixtures/                          real SDK-style analysis scenarios
 docs/diagnostics/                  diagnostic reference
 schemas/packagemedic-simulation.schema.json  Dependency Time Machine report contract
+schemas/packagemedic-analysis-attestation.schema.json  unsigned analysis-evidence contract
 ```
 
 See [architecture.md](docs/architecture.md) for the execution boundary and design choices.
 
 ## Roadmap
 
-Candidates after the PR-intelligence and restore-simulation 0.5 release is proven:
+Candidates after the verified-experiments 0.6 release is proven:
 
-- 0.6: opt-in disposable CI/container build-and-test verification plus SBOM/provenance export
 - 0.7: dependency bisect and a read-only VS Code extension over the stable report contracts
 - 0.8: explicit review-first remediation plans and a separately gated apply workflow
 - 0.9 only if a dedicated stabilization cycle is required before 1.0

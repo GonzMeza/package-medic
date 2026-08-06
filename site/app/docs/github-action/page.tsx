@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { product } from "../../product";
 import CodeBlock from "../code-block";
 import { Callout, DocPage, OptionTable, PageLinks } from "../components";
@@ -58,6 +59,10 @@ steps:
             [<code key="deprecated">deprecated</code>, "false", "Request official NuGet deprecation evidence."],
             [<code key="transitive-deprecated">include-transitive-deprecated</code>, "false", "Include transitive deprecated packages."],
             [<code key="diff">diff-base</code>, "unset", "Reachable Git ref that overrides mode."],
+            [<code key="verify">verify</code>, "unset", "In diff mode, require immutable restore, build, or test evidence."],
+            [<code key="build-timeout">build-timeout</code>, "900", "Bound each generated build target in seconds."],
+            [<code key="test-timeout">test-timeout</code>, "1200", "Bound each generated test project in seconds."],
+            [<code key="verification-config">verification-configuration</code>, "Release", "Configuration shared by verified build and test stages."],
             [<code key="annotations">annotations</code>, "new", "Emit new, all, or no native file annotations."],
             [<code key="sarif">upload-sarif</code>, "true", "Upload deterministic SARIF to Code Scanning."],
             [<code key="artifact">upload-artifact</code>, "true", "Retain JSON and SARIF for 14 days."],
@@ -82,6 +87,12 @@ steps:
           <code>impact-added-transitive</code>, <code>impact-max-blast-radius</code>, and
           <code>impact-source-changes</code>, and <code>impact-content-changes</code>. The job summary
           lists failed PMI policies and their causal dependency paths.
+        </p>
+        <p>
+          Verified comparisons additionally expose <code>verification-status</code>, build/test
+          regression flags, candidate test counts, <code>verification-incomplete</code>,
+          <code>sbom-file</code>, <code>sbom-created</code>, <code>provenance-file</code>, and
+          <code>provenance-created</code>.
         </p>
       </section>
 
@@ -108,6 +119,11 @@ steps:
           returns exit code <code>1</code> even when diagnostic <code>fail-on</code> is
           <code>none</code>; an incomplete base or current graph returns <code>2</code>.
         </p>
+        <p>
+          PackageMedic 0.6 also implements opt-in immutable restore, build, and test comparison.
+          Its runner policy and evidence outputs are documented under
+          <Link href="/docs/verified-experiments"> Verified experiments</Link>.
+        </p>
       </section>
 
       <section id="boundaries">
@@ -122,7 +138,7 @@ steps:
       </section>
 
       <PageLinks
-        previous={{ href: "/docs/time-machine", label: "Time Machine" }}
+        previous={{ href: "/docs/verified-experiments", label: "Verified experiments" }}
         next={{ href: "/docs/reports", label: "Reports" }}
       />
     </DocPage>

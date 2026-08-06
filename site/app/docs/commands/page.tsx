@@ -47,6 +47,11 @@ package-medic diff origin/main . --audit --deprecated --include-transitive --fai
           </p>
         </Callout>
         <p>
+          PackageMedic 0.6 can require comparative restore, build, or test evidence with{" "}
+          <code>--verify</code>. See <Link href="/docs/verified-experiments">Verified experiments</Link>
+          for immutable-snapshot requirements, verdicts, and safety boundaries.
+        </p>
+        <p>
           A complete diff also evaluates the <code>impact</code> policy from
           <code>.packagemedic.json</code>. That gate remains active when
           <code>--fail-on none</code> disables diagnostic threshold failures.
@@ -65,10 +70,10 @@ package-medic diff origin/main . --audit --deprecated --include-transitive --fai
 package-medic simulate Example.Package --to 2.0.0 ./MySolution.sln
 package-medic simulate Example.Package --to 2.0.0 . --audit --deprecated --format json
 package-medic simulate Contoso.Private --to 4.2.0 . --credential-env PRIVATE_FEED_TOKEN`}</CodeBlock>
-        <Callout title="Restore evidence, not compatibility" tone="warning">
+        <Callout title="Restore remains the default evidence level" tone="warning">
           <p>
-            A pass proves the observed restore and graph policy only. Time Machine does not run a
-            build, tests, or runtime verification, and it never labels a candidate safe or compatible.
+            Without <code>--verify</code>, a pass proves the observed restore and graph policy only.
+            Build and test evidence is opt-in, and no level labels a candidate safe or runtime-compatible.
           </p>
         </Callout>
         <p>
@@ -88,7 +93,8 @@ package-medic simulate Contoso.Private --to 4.2.0 . --credential-env PRIVATE_FEE
             [<code key="update">package-medic baseline update [path] [--baseline &lt;file&gt;]</code>, "Refresh an existing accepted state explicitly."],
             [<code key="rules">package-medic rules</code>, "List PM001–PM008 and their default severity."],
             [<code key="explain">package-medic explain PM008</code>, "Show the explanation and next action for one rule."],
-            [<code key="clean">package-medic clean [path] --dry-run</code>, "Preview high-confidence cleanup candidates; never applies changes in 0.5."],
+            [<code key="clean">package-medic clean [path] --dry-run</code>, "Preview high-confidence cleanup candidates; never applies changes in 0.6."],
+            [<code key="sbom">package-medic sbom [path] --output &lt;file&gt;</code>, "Write a deterministic CycloneDX 1.7 NuGet inventory after a complete analysis."],
           ]}
         />
       </section>
@@ -104,6 +110,7 @@ package-medic simulate Contoso.Private --to 4.2.0 . --credential-env PRIVATE_FEE
             [<code key="format">--format text|json|sarif</code>, "Select the primary output format."],
             [<code key="output">--output, -o &lt;path&gt;</code>, "Atomically write the primary report."],
             [<code key="sarif">--sarif-output &lt;path&gt;</code>, "Also write SARIF from the same analysis."],
+            [<code key="sbom-output">--sbom-output &lt;path&gt;</code>, "Also write CycloneDX from doctor, audit, or diff."],
             [<code key="fail">--fail-on none|warning|error</code>, "Gate all effective diagnostics."],
             [<code key="new">--fail-on-new none|warning|error</code>, "Gate only diagnostics absent from the baseline."],
             [<code key="audit">--audit / --deprecated / --include-transitive</code>, "Request official vulnerability or deprecation evidence and optionally transitive packages."],

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import CodeBlock from "../code-block";
 import { Callout, DocPage, OptionTable, PageLinks } from "../components";
 import { simulationJsonExample } from "../simulation-example";
@@ -28,8 +29,8 @@ package-medic simulate Example.Package --to 2.0.0 . \
         <div className="docs-capability-grid compact">
           <article><strong>Restore</strong><p>Run independently for the committed baseline and candidate.</p></article>
           <article><strong>Dependency graph</strong><p>Compare versions, kinds, causal paths, risks, provenance, and Impact Gate policy.</p></article>
-          <article><strong>Build</strong><p>Not run in 0.5.</p></article>
-          <article><strong>Tests and runtime</strong><p>Not run or verified in 0.5.</p></article>
+          <article><strong>Build</strong><p>Not run by default; opt in with <code>--verify build</code>.</p></article>
+          <article><strong>Tests</strong><p>Opt in with <code>--verify test</code>; runtime remains unverified.</p></article>
         </div>
         <Callout title="A pass is deliberately narrow" tone="warning">
           <p>
@@ -37,6 +38,11 @@ package-medic simulate Example.Package --to 2.0.0 . \
             observed diagnostic and Impact Gate policy. It is not a compatibility or safety claim.
           </p>
         </Callout>
+        <p>
+          PackageMedic 0.6 can opt into comparative build and test evidence. See the{" "}
+          <Link href="/docs/verified-experiments">Verified experiments guide</Link> for the
+          execution boundary, conservative verdicts, and structured test requirements.
+        </p>
       </section>
 
       <section id="snapshots">
@@ -110,12 +116,12 @@ package-medic simulate Example.Package --to 2.0.0 . \
       <section id="json">
         <h2>A separate deterministic report contract</h2>
         <p>
-          Simulation JSON schema version 1 separates repository, request, mutation, verification,
+          Simulation JSON schema version 2 separates repository, request, mutation, verification,
           comparison, rejection reasons, and operational errors. Reports contain no timestamps or
           temporary paths. Hypothetical results are not emitted as SARIF or uploaded by the GitHub
-          Action in 0.5.
+          Action.
         </p>
-        <CodeBlock label="Complete schema-v1 example">{simulationJsonExample}</CodeBlock>
+        <CodeBlock label="Complete schema-v2 example">{simulationJsonExample}</CodeBlock>
       </section>
 
       <section id="large-repositories">
@@ -137,7 +143,7 @@ package-medic simulate Example.Package --to 2.0.0 . \
 
       <PageLinks
         previous={{ href: "/docs/impact-gate", label: "Impact Gate" }}
-        next={{ href: "/docs/github-action", label: "GitHub Action" }}
+        next={{ href: "/docs/verified-experiments", label: "Verified experiments" }}
       />
     </DocPage>
   );

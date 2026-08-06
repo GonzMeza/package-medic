@@ -24,6 +24,10 @@ public sealed class MsBuildProjectEvaluator
         "RestorePackagesWithLockFile",
         "RestoreLockedMode",
         "NuGetLockFilePath",
+        "IsTestProject",
+        "IsTestingPlatformApplication",
+        "OutputType",
+        "TargetPath",
     ];
 
     public MsBuildProjectEvaluator(IProcessRunner processRunner)
@@ -59,15 +63,17 @@ public sealed class MsBuildProjectEvaluator
     }
 
     public Task<EvaluatedProject> EvaluateAsync(string projectPath, CancellationToken cancellationToken) =>
-        EvaluateAsync(projectPath, new XmlItemLineLocator(), cancellationToken);
+        EvaluateAsync(projectPath, new XmlItemLineLocator(), null, cancellationToken);
 
     internal async Task<EvaluatedProject> EvaluateAsync(
         string projectPath,
         XmlItemLineLocator lineLocator,
+        string? configuration,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(lineLocator);
-        var outer = await QueryAsync(projectPath, null, cancellationToken).ConfigureAwait(false);
+        ValidateConfiguration(configuration);
+        var outer = await QueryAsync(projectPath, null, configuration, cancellationToken).ConfigureAwait(false);
         var frameworks = SplitFrameworks(outer.Properties);
         if (frameworks.Count > MaximumTargetFrameworksPerProject)
         {
@@ -75,7 +81,8 @@ public sealed class MsBuildProjectEvaluator
                 $"Project '{projectPath}' declares more than the {MaximumTargetFrameworksPerProject} target-framework safety limit.");
         }
         IReadOnlyList<QueryResult> evaluations = frameworks.Count > 1
-            ? await Task.WhenAll(frameworks.Select(framework => QueryAsync(projectPath, framework, cancellationToken)))
+            ? await Task.WhenAll(frameworks.Select(framework =>
+                QueryAsync(projectPath, framework, configuration, cancellationToken)))
                 .ConfigureAwait(false)
             : [outer];
 
@@ -140,6 +147,12 @@ public sealed class MsBuildProjectEvaluator
 
         lockFile = Path.GetFullPath(lockFile);
 
+        var targetPath = NullIfEmpty(GetProperty(properties, "TargetPath"));
+        if (targetPath is not null && !Path.IsPathRooted(targetPath))
+        {
+            targetPath = Path.GetFullPath(targetPath, Path.GetDirectoryName(projectPath)!);
+        }
+
         return new EvaluatedProject(
             projectPath,
             IsTrue(GetProperty(properties, "ManagePackageVersionsCentrally")),
@@ -150,10 +163,18 @@ public sealed class MsBuildProjectEvaluator
             assetsFile,
             IsTrue(GetProperty(properties, "RestorePackagesWithLockFile")),
             IsTrue(GetProperty(properties, "RestoreLockedMode")),
-            lockFile);
+            lockFile,
+            IsTrue(GetProperty(properties, "IsTestProject")),
+            IsTrue(GetProperty(properties, "IsTestingPlatformApplication")),
+            NullIfEmpty(GetProperty(properties, "OutputType")),
+            targetPath);
     }
 
-    private async Task<QueryResult> QueryAsync(string projectPath, string? targetFramework, CancellationToken cancellationToken)
+    private async Task<QueryResult> QueryAsync(
+        string projectPath,
+        string? targetFramework,
+        string? configuration,
+        CancellationToken cancellationToken)
     {
         var arguments = new List<string>
         {
@@ -167,6 +188,11 @@ public sealed class MsBuildProjectEvaluator
         if (!string.IsNullOrWhiteSpace(targetFramework))
         {
             arguments.Add($"-property:TargetFramework={targetFramework}");
+        }
+
+        if (configuration is not null)
+        {
+            arguments.Add($"-property:Configuration={configuration}");
         }
 
         ProcessResult result;
@@ -194,15 +220,15 @@ public sealed class MsBuildProjectEvaluator
             processGate.Release();
         }
 
-        if (result.ExitCode != 0)
-        {
-            throw new InvalidOperationException($"MSBuild evaluation failed for '{projectPath}': {CompactError(result)}");
-        }
-
-        if (result.StandardOutputTruncated)
+        if (result.StandardOutputTruncated || result.StandardErrorTruncated)
         {
             throw new InvalidOperationException(
                 $"MSBuild evaluation output exceeded the {ProcessRunner.DefaultMaximumOutputCharacters}-character safety limit for '{projectPath}'.");
+        }
+
+        if (result.ExitCode != 0)
+        {
+            throw new InvalidOperationException($"MSBuild evaluation failed for '{projectPath}': {CompactError(result)}");
         }
 
         using var document = ParseJsonOutput(result.StandardOutput, projectPath);
@@ -306,6 +332,21 @@ public sealed class MsBuildProjectEvaluator
         return string.Join(' ', error.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(3));
     }
 
+    private static void ValidateConfiguration(string? configuration)
+    {
+        if (configuration is null)
+        {
+            return;
+        }
+
+        if (configuration.Length is < 1 or > 64 ||
+            configuration.Any(character =>
+                !char.IsAsciiLetterOrDigit(character) && character is not '.' and not '_' and not '-'))
+        {
+            throw new ArgumentException("The MSBuild evaluation configuration is invalid.", nameof(configuration));
+        }
+    }
+
     private static string GetProperty(IReadOnlyDictionary<string, string> properties, string name) =>
         properties.TryGetValue(name, out var value) ? value : string.Empty;
 
@@ -333,7 +374,11 @@ public sealed record EvaluatedProject(
     string AssetsFile,
     bool RestorePackagesWithLockFile = false,
     bool RestoreLockedMode = false,
-    string? LockFilePath = null);
+    string? LockFilePath = null,
+    bool IsTestProject = false,
+    bool IsTestingPlatformApplication = false,
+    string? OutputType = null,
+    string? TargetPath = null);
 
 internal static class NuGetLockFileValidator
 {

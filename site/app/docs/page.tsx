@@ -40,6 +40,12 @@ const paths = [
     title: "Simulate before editing",
     copy: "Restore-validate one exact package candidate in disposable snapshots without changing the checkout.",
   },
+  {
+    href: "/docs/verified-experiments",
+    number: "07",
+    title: "Run verified experiments",
+    copy: "Review the 0.6 restore, build, test, CycloneDX, and evidence contracts.",
+  },
 ];
 
 export default function DocsOverview() {
@@ -49,7 +55,7 @@ export default function DocsOverview() {
       title="Diagnose the graph with confidence."
       description="Everything needed to install PackageMedic, choose a workflow, define repository policy, and integrate the result into CI."
     >
-      <Callout title="PackageMedic 0.5 leaves the checkout untouched" tone="success">
+      <Callout title="PackageMedic 0.6 leaves the checkout untouched" tone="success">
         <p>
           Commands inspect dependency evidence and produce reports. They do not rewrite project,
           props, lock, or assets files in the checkout. <code>simulate</code> changes only an owned
@@ -82,7 +88,7 @@ package-medic doctor ./MySolution.sln`}</CodeBlock>
       </section>
 
       <section id="capabilities">
-        <h2>What 0.5 can inspect</h2>
+        <h2>What 0.6 can inspect</h2>
         <div className="docs-capability-grid">
           <article><strong>Dependency policy</strong><p>Unused central versions, drift, CPM bypasses, duplicates, floating versions, and restore problems.</p></article>
           <article><strong>Resolved inventory</strong><p>Direct and transitive packages by project, framework, runtime identifier, and dependency kind.</p></article>
@@ -91,6 +97,8 @@ package-medic doctor ./MySolution.sln`}</CodeBlock>
           <article><strong>PR graph changes</strong><p>Added/removed packages, upgrades, downgrades, dependency-kind transitions, risk deltas, and CPM changes.</p></article>
           <article><strong>Dependency Impact Gate</strong><p>Causal paths, blast radius, source provenance, growth budgets, source mapping, and locked-restore policy.</p></article>
           <article><strong>Dependency Time Machine</strong><p>Exact-version restore simulation in two isolated snapshots with byte-preserving declaration edits.</p></article>
+          <article><strong>Verified experiments</strong><p>Opt-in comparative restore, build, and bounded structured test evidence over immutable snapshots.</p></article>
+          <article><strong>Portable evidence</strong><p>Deterministic CycloneDX 1.7 NuGet inventory and unsigned in-toto analysis statements.</p></article>
           <article><strong>Repository policy</strong><p>Configuration, exclusions, justified suppressions, portable baselines, and new-only gates.</p></article>
           <article><strong>CI-ready reports</strong><p>Readable text, stable JSON, deterministic SARIF, GitHub annotations, summaries, and artifacts.</p></article>
         </div>

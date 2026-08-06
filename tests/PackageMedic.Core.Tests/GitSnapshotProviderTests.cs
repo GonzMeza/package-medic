@@ -82,6 +82,103 @@ public sealed class GitSnapshotProviderTests
     }
 
     [Fact]
+    public async Task RejectsAnExistingTemporaryRootThatIsASymbolicLink()
+    {
+        var repository = CreateTemporaryDirectory("repository");
+        var external = CreateTemporaryDirectory("external-snapshots");
+        var linkContainer = CreateTemporaryDirectory("snapshot-link-container");
+        var temporaryRoot = Path.Combine(linkContainer, "linked-root");
+        var linkCreated = false;
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(temporaryRoot, external);
+                linkCreated = true;
+            }
+            catch (Exception linkError) when (linkError is
+                IOException or
+                UnauthorizedAccessException or
+                PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var runner = new ArchiveProcessRunner(repository, Commit);
+            var provider = new GitSnapshotProvider(runner, TimeSpan.FromSeconds(5), temporaryRoot);
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                provider.MaterializeAsync(repository, "HEAD", TestContext.Current.CancellationToken));
+
+            Assert.Contains("symbolic link", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(
+                runner.Invocations,
+                invocation => invocation.Arguments.Contains("archive", StringComparer.Ordinal));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(external));
+        }
+        finally
+        {
+            if (linkCreated && Directory.Exists(temporaryRoot))
+            {
+                Directory.Delete(temporaryRoot, recursive: false);
+            }
+
+            Directory.Delete(linkContainer, recursive: true);
+            Directory.Delete(external, recursive: true);
+            Directory.Delete(repository, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task RejectsATemporaryRootThatPhysicallyResolvesInsideTheRepository()
+    {
+        var repository = CreateTemporaryDirectory("repository");
+        var physicalTemporaryRoot = Path.Combine(repository, "physical-snapshot-root");
+        Directory.CreateDirectory(physicalTemporaryRoot);
+        var linkContainer = CreateTemporaryDirectory("ancestor-link-container");
+        var linkedRepository = Path.Combine(linkContainer, "linked-repository");
+        var temporaryRoot = Path.Combine(linkedRepository, "physical-snapshot-root");
+        var linkCreated = false;
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkedRepository, repository);
+                linkCreated = true;
+            }
+            catch (Exception linkError) when (linkError is
+                IOException or
+                UnauthorizedAccessException or
+                PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var runner = new ArchiveProcessRunner(repository, Commit);
+            var provider = new GitSnapshotProvider(runner, TimeSpan.FromSeconds(5), temporaryRoot);
+
+            var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                provider.MaterializeAsync(repository, "HEAD", TestContext.Current.CancellationToken));
+
+            Assert.Contains("physically outside", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(
+                runner.Invocations,
+                invocation => invocation.Arguments.Contains("archive", StringComparer.Ordinal));
+            Assert.Empty(Directory.EnumerateFileSystemEntries(physicalTemporaryRoot));
+        }
+        finally
+        {
+            if (linkCreated && Directory.Exists(linkedRepository))
+            {
+                Directory.Delete(linkedRepository, recursive: false);
+            }
+
+            Directory.Delete(linkContainer, recursive: true);
+            Directory.Delete(repository, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CleansTemporaryDirectoryWhenArchivingFails()
     {
         var repository = CreateTemporaryDirectory("repository");
@@ -130,6 +227,64 @@ public sealed class GitSnapshotProviderTests
     }
 
     [Fact]
+    public async Task TrackedManifestDetectsMutationButAllowsGeneratedFiles()
+    {
+        var repository = CreateTemporaryDirectory("repository");
+        var temporaryRoot = CreateTemporaryDirectory("snapshots");
+        try
+        {
+            using var snapshot = await new GitSnapshotProvider(
+                    new ArchiveProcessRunner(repository, Commit),
+                    TimeSpan.FromSeconds(5),
+                    temporaryRoot)
+                .MaterializeAsync(repository, "HEAD", TestContext.Current.CancellationToken);
+            var generated = Path.Combine(snapshot.SnapshotDirectory, "obj", "generated.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(generated)!);
+            File.WriteAllText(generated, "generated");
+
+            snapshot.EnsureTrackedFilesUnchanged();
+
+            var tracked = Path.Combine(snapshot.SnapshotDirectory, "src", "App.csproj");
+            File.WriteAllText(tracked, "mutated");
+            var error = Assert.Throws<InvalidOperationException>(snapshot.EnsureTrackedFilesUnchanged);
+            Assert.Contains("changed", error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Directory.Delete(repository, recursive: true);
+            Directory.Delete(temporaryRoot, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TimeMachineCanRecordExactlyOneExpectedTrackedMutation()
+    {
+        var repository = CreateTemporaryDirectory("repository");
+        var temporaryRoot = CreateTemporaryDirectory("snapshots");
+        try
+        {
+            using var snapshot = await new GitSnapshotProvider(
+                    new ArchiveProcessRunner(repository, Commit),
+                    TimeSpan.FromSeconds(5),
+                    temporaryRoot)
+                .MaterializeAsync(repository, "HEAD", TestContext.Current.CancellationToken);
+            var tracked = Path.Combine(snapshot.SnapshotDirectory, "src", "App.csproj");
+            File.WriteAllText(tracked, "authorized candidate");
+
+            snapshot.RecordExpectedTrackedFileMutation("src/App.csproj");
+            snapshot.EnsureTrackedFilesUnchanged();
+
+            Assert.Throws<InvalidOperationException>(() =>
+                snapshot.RecordExpectedTrackedFileMutation("obj/generated.props"));
+        }
+        finally
+        {
+            Directory.Delete(repository, recursive: true);
+            Directory.Delete(temporaryRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task CleanupDoesNotFollowAHostileDirectorySymbolicLink()
     {
         var repository = CreateTemporaryDirectory("repository");
@@ -139,8 +294,9 @@ public sealed class GitSnapshotProviderTests
         File.WriteAllText(sentinel, "outside");
         try
         {
+            var runner = new ArchiveProcessRunner(repository, Commit);
             var provider = new GitSnapshotProvider(
-                new ArchiveProcessRunner(repository, Commit),
+                runner,
                 TimeSpan.FromSeconds(5),
                 temporaryRoot);
             var snapshot = await provider.MaterializeAsync(
@@ -304,8 +460,9 @@ public sealed class GitSnapshotProviderTests
                 MaximumSingleFileBytes: 1024,
                 MaximumEntries: 10,
                 MinimumFreeBytesAfterExtraction: 0);
+            var runner = new ArchiveProcessRunner(repository, Commit);
             var provider = new GitSnapshotProvider(
-                new ArchiveProcessRunner(repository, Commit),
+                runner,
                 TimeSpan.FromSeconds(5),
                 temporaryRoot,
                 limits);
@@ -314,6 +471,9 @@ public sealed class GitSnapshotProviderTests
                 () => provider.MaterializeAsync(repository, "HEAD", TestContext.Current.CancellationToken));
 
             Assert.Contains("archive", exception.Message, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(
+                runner.Invocations,
+                invocation => invocation.Arguments.Contains("archive", StringComparer.Ordinal));
             Assert.Empty(Directory.EnumerateFileSystemEntries(temporaryRoot));
         }
         finally
@@ -462,6 +622,14 @@ public sealed class GitSnapshotProviderTests
             if (arguments.Count >= 2 && arguments[0] == "rev-parse" && arguments[1] == "--verify")
             {
                 return Task.FromResult(new ProcessResult(0, commit + Environment.NewLine, string.Empty));
+            }
+
+            if (arguments.Count > 0 && arguments[0] == "ls-tree")
+            {
+                return Task.FromResult(new ProcessResult(
+                    0,
+                    "100644 blob 7\n",
+                    string.Empty));
             }
 
             if (arguments.Contains("archive", StringComparer.Ordinal))

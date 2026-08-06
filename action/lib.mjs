@@ -6,6 +6,13 @@ import { fileURLToPath } from 'node:url';
 const exactNuGetVersion = /^\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?(?:\+[0-9A-Za-z]+(?:[.-][0-9A-Za-z]+)*)?$/;
 export const maximumJsonReportBytes = 256 * 1024 * 1024;
 
+export function isVerifiedRestoreRejection(report) {
+  const decision = report?.diff?.verification?.decision;
+  return String(decision?.verdict ?? '').trim().toLowerCase() === 'reject' &&
+    String(decision?.blockingSnapshot ?? '').trim().toLowerCase() === 'candidate' &&
+    String(decision?.blockingStage ?? '').trim().toLowerCase() === 'restore';
+}
+
 export function runCommand(executable, args, spawn = spawnSync) {
   const result = spawn(executable, args, { windowsHide: true, stdio: 'inherit' });
   if (result.error) throw result.error;
@@ -43,7 +50,7 @@ export function parseAnnotationMode(value) {
 export function validateExactVersion(value) {
   const version = String(value ?? '').trim();
   if (!exactNuGetVersion.test(version) || version.includes('*')) {
-    throw new Error('tool-version must be an exact NuGet version, for example 0.5.0.');
+    throw new Error('tool-version must be an exact NuGet version, for example 0.6.0.');
   }
   return version;
 }
@@ -59,6 +66,12 @@ export function validateGitReference(value) {
 
 export function resolveAnalysisMode(value, explicitBase, eventName, pullRequestBaseSha) {
   const mode = enumValue(value || 'auto', 'mode', ['auto', 'scan', 'diff']);
+  const event = String(eventName ?? '').trim().toLowerCase();
+  if (event === 'pull_request_target') {
+    throw new Error(
+      'PackageMedic does not analyze pull_request_target because repository-controlled restore, MSBuild, analyzers, and tests must not run with its privileged context; use the unprivileged pull_request event instead.');
+  }
+
   const requestedBase = validateGitReference(explicitBase);
   if (requestedBase) return { mode: 'diff', diffBase: requestedBase, automatic: false };
   if (mode === 'scan') return { mode: 'scan', diffBase: undefined, automatic: false };
@@ -66,11 +79,6 @@ export function resolveAnalysisMode(value, explicitBase, eventName, pullRequestB
     throw new Error("mode 'diff' requires diff-base because no implicit comparison reference is assumed.");
   }
 
-  const event = String(eventName ?? '').trim().toLowerCase();
-  if (event === 'pull_request_target') {
-    throw new Error(
-      "mode 'auto' does not analyze pull_request_target because its default checkout is the trusted base branch; use the unprivileged pull_request event instead.");
-  }
   if (event === 'pull_request') {
     const diffBase = validateGitReference(pullRequestBaseSha);
     if (!diffBase) throw new Error('Pull request auto mode could not resolve github.event.pull_request.base.sha.');
@@ -289,6 +297,29 @@ export function reportDetails(report) {
   };
   const suppressed = count(report.policy?.suppressed ?? suppressedDiagnostics.length);
 
+  const verification = report.diff?.verification && typeof report.diff.verification === 'object'
+    ? (() => {
+        const value = report.diff.verification;
+        const verdict = String(value.decision?.verdict ?? '').trim().toLowerCase();
+        const blockingSnapshot = String(value.decision?.blockingSnapshot ?? '').trim().toLowerCase();
+        const blockingStage = String(value.decision?.blockingStage ?? '').trim().toLowerCase();
+        return {
+          level: String(value.level ?? '').trim().toLowerCase(),
+          status: verdict,
+          buildRegression: verdict === 'reject' && blockingSnapshot === 'candidate' && blockingStage === 'build',
+          testRegression: verdict === 'reject' && blockingSnapshot === 'candidate' && blockingStage === 'test',
+          testsPassed: count(value.candidate?.tests?.passed),
+          testsFailed: count(value.candidate?.tests?.failed),
+          testsSkipped: count(value.candidate?.tests?.skipped),
+          incomplete: verdict === 'incomplete',
+          baselineBuild: String(value.baseline?.build?.stage?.status ?? 'notRequested').trim(),
+          candidateBuild: String(value.candidate?.build?.stage?.status ?? 'notRequested').trim(),
+          baselineTests: String(value.baseline?.tests?.stage?.status ?? 'notRequested').trim(),
+          candidateTests: String(value.candidate?.tests?.stage?.status ?? 'notRequested').trim(),
+        };
+      })()
+    : undefined;
+
   const diff = report.diff && typeof report.diff === 'object'
     ? {
         added: count(report.diff.summary?.added),
@@ -312,6 +343,7 @@ export function reportDetails(report) {
         complete: report.diff.isComplete !== false,
         baselineAnalysisErrors: Array.isArray(report.diff.baselineAnalysisErrors) ? report.diff.baselineAnalysisErrors.length : 0,
         currentAnalysisErrors: Array.isArray(report.diff.currentAnalysisErrors) ? report.diff.currentAnalysisErrors.length : 0,
+        verification,
         impact: report.diff.impact && typeof report.diff.impact === 'object'
           ? {
               gatePassed: report.diff.impact.gatePassed === true,
@@ -452,6 +484,30 @@ export function renderSummary(report, details, exitCode, workspace = process.cwd
           ...(impact.omittedViolations > 0
             ? [`- ${impact.omittedViolations} additional violation(s) are available in the JSON report.`]
             : []),
+          '');
+      }
+    }
+
+    if (details.diff.verification) {
+      const verification = details.diff.verification;
+      summary.splice(
+        summary.length - 2,
+        0,
+        `### Verification: ${boundedMarkdown(verification.status || 'unknown', 64)}`,
+        '',
+        '| Level | Baseline build | Candidate build | Baseline tests | Candidate tests |',
+        '| --- | --- | --- | --- | --- |',
+        `| ${boundedMarkdown(verification.level || 'unknown', 64)} | ${boundedMarkdown(verification.baselineBuild, 64)} | ${boundedMarkdown(verification.candidateBuild, 64)} | ${boundedMarkdown(verification.baselineTests, 64)} | ${boundedMarkdown(verification.candidateTests, 64)} |`,
+        '',
+        '| Candidate tests passed | Failed | Skipped |',
+        '| ---: | ---: | ---: |',
+        `| ${verification.testsPassed} | ${verification.testsFailed} | ${verification.testsSkipped} |`,
+        '');
+      if (verification.incomplete) {
+        summary.splice(
+          summary.length - 2,
+          0,
+          '**Verification incomplete** — the requested comparison did not produce reliable evidence for every required stage.',
           '');
       }
     }

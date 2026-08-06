@@ -54,7 +54,8 @@ public sealed class PackageMedicAnalyzer
         string? containmentRoot = null,
         bool forceEvaluateRestore = false,
         string? packagesDirectory = null,
-        RestoreExecutionResult? preparedRestore = null)
+        RestoreExecutionResult? preparedRestore = null,
+        string? verificationConfiguration = null)
     {
         var discovered = discovery.Discover(requestedPath, containmentRoot);
         return await AnalyzeAsync(
@@ -65,7 +66,8 @@ public sealed class PackageMedicAnalyzer
             containmentRoot,
             forceEvaluateRestore,
             packagesDirectory,
-            preparedRestore).ConfigureAwait(false);
+            preparedRestore,
+            verificationConfiguration).ConfigureAwait(false);
     }
 
     public async Task<AnalysisOutcome> AnalyzeAsync(
@@ -76,7 +78,8 @@ public sealed class PackageMedicAnalyzer
         string? containmentRoot = null,
         bool forceEvaluateRestore = false,
         string? packagesDirectory = null,
-        RestoreExecutionResult? preparedRestore = null)
+        RestoreExecutionResult? preparedRestore = null,
+        string? verificationConfiguration = null)
     {
         ArgumentNullException.ThrowIfNull(discovered);
         var trustedRoot = Path.GetFullPath(containmentRoot ??
@@ -85,6 +88,7 @@ public sealed class PackageMedicAnalyzer
                 : Path.GetDirectoryName(discovered.Target)!));
         var initialDiagnostics = new List<Diagnostic>();
         var analysisErrors = new List<string>(discovered.Errors);
+        RestoreExecutionResult? restoreEvidence = preparedRestore;
 
         if (preparedRestore is not null)
         {
@@ -93,14 +97,15 @@ public sealed class PackageMedicAnalyzer
         }
         else if (!noRestore)
         {
-            var restore = await restoreRunner.RestoreAsync(
+            restoreEvidence = await restoreRunner.RestoreDetailedAsync(
                 discovered,
                 progress,
                 cancellationToken,
                 forceEvaluateRestore,
-                packagesDirectory).ConfigureAwait(false);
-            initialDiagnostics.AddRange(restore.Diagnostics);
-            analysisErrors.AddRange(restore.Errors);
+                packagesDirectory,
+                verificationConfiguration).ConfigureAwait(false);
+            initialDiagnostics.AddRange(restoreEvidence.Diagnostics);
+            analysisErrors.AddRange(restoreEvidence.Errors);
         }
         else
         {
@@ -126,6 +131,7 @@ public sealed class PackageMedicAnalyzer
                     progressGate,
                     trustedRoot,
                     packagesDirectory,
+                    verificationConfiguration,
                     token).ConfigureAwait(false);
             }).ConfigureAwait(false);
         var projects = evaluatedProjects
@@ -185,7 +191,15 @@ public sealed class PackageMedicAnalyzer
                 .ThenBy(item => item.PackageId, StringComparer.OrdinalIgnoreCase)
                 .ToArray(),
         };
-        return new AnalysisOutcome(result, analysisErrors.Count > 0);
+        return new AnalysisOutcome(result, analysisErrors.Count > 0)
+        {
+            Discovery = discovered,
+            EvaluatedProjects = evaluatedProjects
+                .Where(item => item?.Evaluation is not null)
+                .Select(item => item!.Evaluation!)
+                .ToArray(),
+            Restore = restoreEvidence,
+        };
     }
 
     internal static IReadOnlyList<PackageInventoryItem> EnrichPackageInventory(
@@ -262,6 +276,7 @@ public sealed class PackageMedicAnalyzer
         object progressGate,
         string trustedRoot,
         string? trustedPackagesDirectory,
+        string? verificationConfiguration,
         CancellationToken cancellationToken)
     {
         lock (progressGate)
@@ -271,7 +286,11 @@ public sealed class PackageMedicAnalyzer
 
         try
         {
-            var evaluated = await evaluator.EvaluateAsync(projectPath, lineLocator, cancellationToken).ConfigureAwait(false);
+            var evaluated = await evaluator.EvaluateAsync(
+                projectPath,
+                lineLocator,
+                verificationConfiguration,
+                cancellationToken).ConfigureAwait(false);
             var assets = assetsReader.Read(
                 evaluated.AssetsFile,
                 projectPath,
@@ -296,11 +315,11 @@ public sealed class PackageMedicAnalyzer
                 RestoreLockedMode = evaluated.RestoreLockedMode,
                 LockFileAvailable = NuGetLockFileValidator.IsTrustedAndValid(evaluated.LockFilePath, trustedRoot),
                 AssetDiagnostics = assets.Diagnostics,
-            }, null);
+            }, evaluated, null);
         }
         catch (Exception exception) when (exception is InvalidOperationException or IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
         {
-            return new ProjectEvaluationOutcome(null, exception.Message);
+            return new ProjectEvaluationOutcome(null, null, exception.Message);
         }
     }
 
@@ -370,5 +389,8 @@ public sealed class PackageMedicAnalyzer
             : normalized;
     }
 
-    private sealed record ProjectEvaluationOutcome(ProjectAnalysis? Project, string? Error);
+    private sealed record ProjectEvaluationOutcome(
+        ProjectAnalysis? Project,
+        EvaluatedProject? Evaluation,
+        string? Error);
 }

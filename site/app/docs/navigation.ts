@@ -10,7 +10,7 @@ export const docsNavigation: DocsNavigationItem[] = [
     href: "/docs",
     label: "Overview",
     description: "Choose the right PackageMedic workflow.",
-    keywords: "introduction overview start workflow 0.5",
+    keywords: "introduction overview start workflow 0.6",
   },
   {
     href: "/docs/getting-started",
@@ -47,6 +47,12 @@ export const docsNavigation: DocsNavigationItem[] = [
     label: "Time Machine",
     description: "Restore-validate one exact package candidate.",
     keywords: "simulate time machine candidate version snapshot restore what if upgrade rollback lock file credentials",
+  },
+  {
+    href: "/docs/verified-experiments",
+    label: "Verified experiments",
+    description: "Restore, build, test, SBOM, and evidence workflows.",
+    keywords: "0.6 verify restore build test trx sbom cyclonedx provenance in-toto self-hosted immutable snapshots",
   },
   {
     href: "/docs/github-action",

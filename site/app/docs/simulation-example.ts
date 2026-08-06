@@ -1,7 +1,7 @@
 export const simulationJsonExample = `{
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "kind": "dependencySimulation",
-  "toolVersion": "0.5.0",
+  "toolVersion": "0.6.0",
   "repository": {
     "headCommit": "0000000000000000000000000000000000000000",
     "analysisTarget": "MySolution.sln",

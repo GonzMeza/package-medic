@@ -14,7 +14,7 @@ inputs:
   tool-version:
     description: Exact PackageMedic.Tool NuGet version to install (wildcards are rejected).
     required: false
-    default: 0.5.0
+    default: 0.6.0
   dotnet-version:
     description: .NET SDK version used to install and run PackageMedic.
     required: false
@@ -67,6 +67,26 @@ inputs:
     description: Optional Git reference to compare with the checked-out dependency graph; overrides mode.
     required: false
     default: ''
+  verify:
+    description: Optional immutable diff verification level (restore, build, or test). Build/test execute repository-controlled code.
+    required: false
+    default: ''
+  build-timeout:
+    description: Optional per-build-target verification timeout in seconds (1-3600).
+    required: false
+    default: ''
+  test-timeout:
+    description: Optional per-test-project verification timeout in seconds (1-3600).
+    required: false
+    default: ''
+  verification-configuration:
+    description: Build configuration used by verified build and test stages.
+    required: false
+    default: Release
+  allow-self-hosted-verification:
+    description: Explicitly permit build/test verification on a separately secured self-hosted runner.
+    required: false
+    default: 'false'
   verbosity:
     description: PackageMedic progress verbosity (quiet, normal, or detailed).
     required: false
@@ -110,6 +130,12 @@ outputs:
   sarif-file:
     description: Absolute path to the SARIF report.
     value: ${{ steps.scan.outputs.sarif-file }}
+  sbom-file:
+    description: Absolute path to the deterministic CycloneDX 1.7 report.
+    value: ${{ steps.scan.outputs.sbom-file }}
+  provenance-file:
+    description: Absolute path to unsigned in-toto analysis evidence; created only for completed verified diffs.
+    value: ${{ steps.scan.outputs.provenance-file }}
   errors:
     description: Number of error diagnostics.
     value: ${{ steps.scan.outputs.errors }}
@@ -191,6 +217,33 @@ outputs:
   impact-content-changes:
     description: Number of same-version packages whose restored content hash changed.
     value: ${{ steps.scan.outputs.impact-content-changes }}
+  verification-status:
+    description: Verification verdict (pass, reject, noChange, or incomplete); empty when not requested.
+    value: ${{ steps.scan.outputs.verification-status }}
+  build-regression:
+    description: Whether the candidate introduced a build failure after a passing baseline.
+    value: ${{ steps.scan.outputs.build-regression }}
+  test-regression:
+    description: Whether the candidate introduced a test failure after a passing baseline.
+    value: ${{ steps.scan.outputs.test-regression }}
+  tests-passed:
+    description: Candidate tests reported as passed by bounded structured evidence.
+    value: ${{ steps.scan.outputs.tests-passed }}
+  tests-failed:
+    description: Candidate tests reported as failed by bounded structured evidence.
+    value: ${{ steps.scan.outputs.tests-failed }}
+  tests-skipped:
+    description: Candidate tests reported as skipped by bounded structured evidence.
+    value: ${{ steps.scan.outputs.tests-skipped }}
+  verification-incomplete:
+    description: Whether requested verification could not produce reliable comparative evidence.
+    value: ${{ steps.scan.outputs.verification-incomplete }}
+  provenance-created:
+    description: Whether unsigned in-toto evidence was created for this verified diff.
+    value: ${{ steps.scan.outputs.provenance-created }}
+  sbom-created:
+    description: Whether deterministic CycloneDX evidence was created for this analysis.
+    value: ${{ steps.scan.outputs.sbom-created }}
   artifact-name:
     description: Isolated artifact name generated for this invocation.
     value: ${{ steps.scan.outputs.artifact-name }}
@@ -226,6 +279,12 @@ runs:
         PACKAGEMEDIC_DEPRECATED: ${{ inputs.deprecated }}
         PACKAGEMEDIC_INCLUDE_TRANSITIVE_DEPRECATED: ${{ inputs.include-transitive-deprecated }}
         PACKAGEMEDIC_DIFF_BASE: ${{ inputs.diff-base }}
+        PACKAGEMEDIC_VERIFY: ${{ inputs.verify }}
+        PACKAGEMEDIC_BUILD_TIMEOUT: ${{ inputs.build-timeout }}
+        PACKAGEMEDIC_TEST_TIMEOUT: ${{ inputs.test-timeout }}
+        PACKAGEMEDIC_VERIFICATION_CONFIGURATION: ${{ inputs.verification-configuration }}
+        PACKAGEMEDIC_ALLOW_SELF_HOSTED_VERIFICATION: ${{ inputs.allow-self-hosted-verification }}
+        PACKAGEMEDIC_RUNNER_ENVIRONMENT: ${{ runner.environment }}
         PACKAGEMEDIC_GITHUB_EVENT_NAME: ${{ github.event_name }}
         PACKAGEMEDIC_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         PACKAGEMEDIC_VERBOSITY: ${{ inputs.verbosity }}
@@ -261,6 +320,8 @@ runs:
         path: |
           ${{ steps.scan.outputs.json-file }}
           ${{ steps.scan.outputs.sarif-file }}
+          ${{ steps.scan.outputs.sbom-file }}
+          ${{ steps.scan.outputs.provenance-file }}
         if-no-files-found: warn
         retention-days: 14
 

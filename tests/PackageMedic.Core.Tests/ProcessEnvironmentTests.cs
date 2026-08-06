@@ -39,6 +39,7 @@ public sealed class ProcessEnvironmentTests
             Assert.Equal("1", startInfo.Environment["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"]);
             Assert.Equal("1", startInfo.Environment["DOTNET_NOLOGO"]);
             Assert.Equal("1", startInfo.Environment["MSBUILDDISABLENODEREUSE"]);
+            Assert.Equal("0", startInfo.Environment["DOTNET_CLI_USE_MSBUILD_SERVER"]);
             Assert.Equal("skip", startInfo.Environment["NUGET_XMLDOC_MODE"]);
             Assert.Equal(Path.GetFullPath(packages), startInfo.Environment["NUGET_PACKAGES"]);
             foreach (var name in IsolatedDirectoryVariables)
@@ -207,6 +208,39 @@ public sealed class ProcessEnvironmentTests
     }
 
     [Fact]
+    public void OwnedTemporaryDirectoryRejectsARootThatPhysicallyResolvesInsideTheRepository()
+    {
+        var outer = CreateTemporaryDirectory();
+        var repository = Directory.CreateDirectory(Path.Combine(outer, "repository")).FullName;
+        var physicalTemporaryRoot = Directory.CreateDirectory(Path.Combine(repository, "runtime-root")).FullName;
+        var link = Path.Combine(outer, "runtime-link");
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(link, physicalTemporaryRoot);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            var error = Assert.Throws<InvalidOperationException>(() =>
+                OwnedTemporaryDirectory.Create(repository, link));
+            Assert.Contains("outside", error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            if (Directory.Exists(link))
+            {
+                Directory.Delete(link, recursive: false);
+            }
+
+            Directory.Delete(outer, recursive: true);
+        }
+    }
+
+    [Fact]
     public void NonIsolatedOverridesPreserveUnrelatedInheritedVariables()
     {
         var environment = ProcessEnvironment.CreateOverrides(new Dictionary<string, string?>
@@ -275,10 +309,8 @@ public sealed class ProcessEnvironmentTests
                 path,
                 OperatingSystem.IsWindows() ? ".EXE" : null);
 
-            Assert.Equal(
-                Path.GetFullPath(hostExecutable),
-                resolved,
-                ignoreCase: OperatingSystem.IsWindows());
+            Assert.True(File.Exists(resolved));
+            Assert.Equal("trusted host placeholder", File.ReadAllText(resolved));
             Assert.Throws<InvalidOperationException>(() => ProcessRunner.ResolveExecutable(
                 repositoryExecutable,
                 repository.FullName,
@@ -315,10 +347,8 @@ public sealed class ProcessEnvironmentTests
                 OperatingSystem.IsWindows() ? ".EXE" : null,
                 [repository.FullName]);
 
-            Assert.Equal(
-                Path.GetFullPath(hostExecutable),
-                resolved,
-                ignoreCase: OperatingSystem.IsWindows());
+            Assert.True(File.Exists(resolved));
+            Assert.Equal("trusted host placeholder", File.ReadAllText(resolved));
         }
         finally
         {
@@ -361,10 +391,8 @@ public sealed class ProcessEnvironmentTests
                 OperatingSystem.IsWindows() ? ".EXE" : null,
                 [repository.FullName]);
 
-            Assert.Equal(
-                Path.GetFullPath(hostExecutable),
-                resolved,
-                ignoreCase: OperatingSystem.IsWindows());
+            Assert.True(File.Exists(resolved));
+            Assert.Equal("trusted host placeholder", File.ReadAllText(resolved));
 
             var linkedRepository = Path.Combine(pathRoot.FullName, "linked-repository");
             Directory.CreateSymbolicLink(linkedRepository, repository.FullName);
@@ -375,10 +403,8 @@ public sealed class ProcessEnvironmentTests
                 OperatingSystem.IsWindows() ? ".EXE" : null,
                 [linkedRepository]);
 
-            Assert.Equal(
-                Path.GetFullPath(hostExecutable),
-                resolvedThroughLinkedRoot,
-                ignoreCase: OperatingSystem.IsWindows());
+            Assert.True(File.Exists(resolvedThroughLinkedRoot));
+            Assert.Equal("trusted host placeholder", File.ReadAllText(resolvedThroughLinkedRoot));
         }
         finally
         {

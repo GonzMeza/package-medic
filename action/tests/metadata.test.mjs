@@ -25,6 +25,11 @@ test('action metadata declares a composite action and public contract', () => {
     'deprecated',
     'include-transitive-deprecated',
     'diff-base',
+    'verify',
+    'build-timeout',
+    'test-timeout',
+    'verification-configuration',
+    'allow-self-hosted-verification',
     'max-parallelism',
     'annotations',
     'upload-sarif',
@@ -33,7 +38,7 @@ test('action metadata declares a composite action and public contract', () => {
     assert.match(metadata, new RegExp(`^  ${input}:$`, 'm'));
   }
   for (const output of [
-    'exit-code', 'json-file', 'sarif-file', 'errors', 'warnings', 'information',
+    'exit-code', 'json-file', 'sarif-file', 'sbom-file', 'provenance-file', 'errors', 'warnings', 'information',
     'findings-added', 'findings-resolved', 'severity-changed',
     'packages-added', 'packages-removed', 'packages-upgraded', 'packages-downgraded',
     'uncomparable-version-changes', 'direct-to-transitive', 'transitive-to-direct', 'cpm-changes',
@@ -43,6 +48,8 @@ test('action metadata declares a composite action and public contract', () => {
     'impact-gate-passed', 'impact-violations', 'impact-added-direct',
     'impact-added-transitive', 'impact-max-blast-radius', 'impact-source-changes',
     'impact-content-changes',
+    'verification-status', 'build-regression', 'test-regression',
+    'tests-passed', 'tests-failed', 'tests-skipped', 'verification-incomplete', 'provenance-created', 'sbom-created',
     'artifact-name', 'sarif-category',
   ]) {
     assert.match(metadata, new RegExp(`^  ${output}:$`, 'm'));
@@ -67,6 +74,9 @@ test('action creates JSON and SARIF from one PackageMedic analysis', () => {
   assert.match(runner, /baseArguments\.push\('--include-transitive-audit'\)/);
   assert.match(runner, /baseArguments\.push\('--include-transitive-deprecated'\)/);
   assert.match(runner, /baseArguments\.push\('--max-parallelism', String\(maxParallelism\)\)/);
+  assert.match(runner, /baseArguments\.push\('--verify', verify, '--verification-configuration', verificationConfiguration\)/);
+  assert.match(runner, /baseArguments\.push\('--provenance-output', provenanceFile\)/);
+  assert.match(runner, /baseArguments\.push\('--sbom-output', sbomFile\)/);
   assert.match(runner, /runCommand\(executable/);
   assert.doesNotMatch(runner, /spawnSync|result\.stdout|result\.stderr/);
   assert.doesNotMatch(runner, /sarifArguments|sarifExit/);
@@ -107,6 +117,17 @@ test('CI smoke-tests local Action diff mode', () => {
   assert.match(workflow, /name: Smoke-test local GitHub Action diff mode/);
   assert.match(workflow, /diff-base: HEAD/);
   assert.match(workflow, /name: Verify Action diff reports/);
+  assert.match(workflow, /name: Smoke-test verified Action restore mode/);
+  assert.match(workflow, /verify: restore/);
+  assert.match(workflow, /name: Verify Action verification evidence/);
+  assert.match(workflow, /name: Verify native Microsoft Testing Platform end to end/);
+  assert.match(workflow, /dotnet-version: 10\.0\.x/);
+  assert.match(workflow, /PACKAGEMEDIC_REQUIRE_NATIVE_MTP_E2E: 'true'/);
+  assert.match(workflow, /name: Validate CycloneDX 1\.7 output with the official CLI/);
+  assert.match(workflow, /cyclonedx-cli\/releases\/download\/v0\.33\.1\/cyclonedx-linux-x64/);
+  assert.match(workflow, /bfc8b2538da86fe239bc53658bbb63c1c8c510a293c1e6891aa5bea5d3c58746/);
+  assert.match(workflow, /--input-version v1_7/);
+  assert.match(workflow, /--fail-on-errors/);
 });
 
 test('all local scripts referenced by action metadata exist', () => {

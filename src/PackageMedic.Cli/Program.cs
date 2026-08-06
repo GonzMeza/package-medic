@@ -64,6 +64,7 @@ public static class Program
                 CliCommand.Simulate => await RunSimulationV2Async(options, output, error, cancellationToken).ConfigureAwait(false),
                 CliCommand.Doctor or CliCommand.Audit =>
                     await RunDoctorAsync(options, output, error, cancellationToken).ConfigureAwait(false),
+                CliCommand.Sbom => await RunSbomAsync(options, error, cancellationToken).ConfigureAwait(false),
                 CliCommand.Diff => await RunDiffAsync(options, output, error, cancellationToken).ConfigureAwait(false),
                 _ => throw new UsageException("A command is required."),
             };
@@ -119,6 +120,35 @@ public static class Program
         return allReached || newReached ? 1 : 0;
     }
 
+    private static async Task<int> RunSbomAsync(
+        CliOptions options,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        ValidateOutputPaths(options);
+        var prepared = await AnalyzeAsync(options, error, cancellationToken).ConfigureAwait(false);
+        if (prepared.HasOperationalError)
+        {
+            if (options.Verbosity != OutputVerbosity.Quiet)
+            {
+                await error.WriteLineAsync(
+                    "CycloneDX output was not written because dependency analysis was incomplete.")
+                    .ConfigureAwait(false);
+            }
+
+            return 2;
+        }
+
+        await WriteSbomFileAsync(options.SbomOutputPath!, prepared, cancellationToken).ConfigureAwait(false);
+        if (options.Verbosity != OutputVerbosity.Quiet)
+        {
+            await error.WriteLineAsync($"Wrote CycloneDX 1.7 SBOM to {options.SbomOutputPath}")
+                .ConfigureAwait(false);
+        }
+
+        return 0;
+    }
+
     private static async Task<int> RunDiffAsync(
         CliOptions options,
         TextWriter output,
@@ -126,6 +156,12 @@ public static class Program
         CancellationToken cancellationToken)
     {
         ValidateOutputPaths(options);
+        if (options.Verify is not null)
+        {
+            return await RunVerifiedDiffAsync(options, output, error, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         var currentRepositoryRoot = FindRepositoryRoot(options.Path);
         var currentTarget = Path.GetFullPath(options.Path ?? Directory.GetCurrentDirectory());
         EnsureWithinRepository(currentTarget, currentRepositoryRoot, "The diff target");
@@ -155,23 +191,36 @@ public static class Program
                 $"The target '{ToPortableDisplayPath(currentTarget, currentRepositoryRoot)}' does not exist in Git reference '{options.GitReference}'.");
         }
 
+        // A Git comparison must not allow the candidate tree to select or weaken the
+        // policy that evaluates that same candidate. Repository-owned configuration is
+        // resolved from the immutable base snapshot and then applied to both analyses.
+        // An explicit configuration outside the repository remains caller-owned invocation
+        // policy and is likewise shared by both sides.
+        var trustedOptions = ResolveTrustedDiffConfiguration(
+            options,
+            currentRepositoryRoot,
+            currentTarget,
+            snapshot.SnapshotDirectory,
+            snapshotTarget);
+
         using var currentRuntimeRoot = OwnedTemporaryDirectory.Create(currentRepositoryRoot);
         using var baselineRuntimeRoot = OwnedTemporaryDirectory.Create(currentRepositoryRoot);
         var untrustedRoots = new[] { currentRepositoryRoot, snapshot.SnapshotDirectory };
         var currentRuntime = CreateDiffRuntime(currentRuntimeRoot.DirectoryPath, untrustedRoots, processRunner);
         var baselineRuntime = CreateDiffRuntime(baselineRuntimeRoot.DirectoryPath, untrustedRoots, processRunner);
         var current = await AnalyzeAsync(
-            options,
+            trustedOptions,
             error,
             cancellationToken,
             currentRepositoryRoot,
             packagesDirectory: currentRuntime.PackagesDirectory,
             processRunnerOverride: currentRuntime.ProcessRunner).ConfigureAwait(false);
-        var baselineOptions = options with
+        var baselineOptions = trustedOptions with
         {
             Path = snapshotTarget,
             OutputPath = null,
             SarifOutputPath = null,
+            SbomOutputPath = null,
             BaselinePath = null,
             FailOnNew = null,
             GitReference = null,
@@ -190,8 +239,29 @@ public static class Program
             currentRepositoryRoot,
             snapshot.Reference,
             snapshot.Commit,
-            current.Context.Policy.Impact);
+            baseline.Context.Policy.Impact);
 
+        return await CompleteDiffAsync(
+            options,
+            current,
+            currentRepositoryRoot,
+            baseline,
+            comparison,
+            output,
+            error,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<int> CompleteDiffAsync(
+        CliOptions options,
+        PreparedAnalysis current,
+        string currentRepositoryRoot,
+        PreparedAnalysis baseline,
+        AnalysisDiffReport comparison,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
         var gateFingerprints = comparison.Changes
             .Where(change => change.Kind == DiagnosticChangeKind.Added ||
                              change.Kind == DiagnosticChangeKind.SeverityChanged &&
@@ -224,15 +294,230 @@ public static class Program
             comparison,
             cancellationToken).ConfigureAwait(false);
 
+        if (comparison.Verification?.Decision.Verdict == VerificationVerdict.Incomplete)
+        {
+            return 2;
+        }
+
+        if (comparison.Verification?.Decision.Verdict == VerificationVerdict.Reject)
+        {
+            return 1;
+        }
+
         if (!comparison.IsComplete || current.HasOperationalError || baseline.HasOperationalError)
         {
             return 2;
         }
 
         return comparison.Impact?.GatePassed == false ||
-               ReachesThreshold(gateDiagnostics, current.Context.Policy.FailOn)
+               ReachesThreshold(gateDiagnostics, baseline.Context.Policy.FailOn)
             ? 1
             : 0;
+    }
+
+    private static async Task<int> RunVerifiedDiffAsync(
+        CliOptions options,
+        TextWriter output,
+        TextWriter error,
+        CancellationToken cancellationToken)
+    {
+        var repositoryRoot = FindRepositoryRoot(options.Path);
+        var currentTarget = Path.GetFullPath(options.Path ?? Directory.GetCurrentDirectory());
+        EnsureWithinRepository(currentTarget, repositoryRoot, "The verified diff target");
+        if (!File.Exists(currentTarget) && !Directory.Exists(currentTarget))
+        {
+            throw new ArgumentException($"The verified diff target does not exist: {currentTarget}");
+        }
+
+        var processRunner = new ProcessRunner();
+        var workingTree = new GitWorkingTreeInspector(processRunner);
+        var commits = new GitCommitInspector(processRunner);
+        await workingTree.EnsureCleanAsync(repositoryRoot, cancellationToken).ConfigureAwait(false);
+        var currentCommit = await commits.ResolveHeadAsync(repositoryRoot, cancellationToken)
+            .ConfigureAwait(false);
+        var baselineCommit = await commits.ResolveCommitAsync(
+                repositoryRoot,
+                options.GitReference!,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await commits.EnsureVerificationTreeSupportedAsync(
+                repositoryRoot,
+                baselineCommit,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await commits.EnsureVerificationTreeSupportedAsync(
+                repositoryRoot,
+                currentCommit,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await workingTree.EnsureArchiveSemanticsAreReproducibleAsync(
+                repositoryRoot,
+                baselineCommit,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await workingTree.EnsureArchiveSemanticsAreReproducibleAsync(
+                repositoryRoot,
+                currentCommit,
+                cancellationToken)
+            .ConfigureAwait(false);
+
+        PreparedAnalysis current;
+        PreparedAnalysis baseline;
+        AnalysisDiffReport comparison;
+        string? provenance = null;
+        Exception? operationError = null;
+        try
+        {
+            using (var baselineSnapshot = await new GitSnapshotProvider(processRunner)
+                   .MaterializeAsync(repositoryRoot, baselineCommit, cancellationToken)
+                   .ConfigureAwait(false))
+            using (var currentSnapshot = await new GitSnapshotProvider(processRunner)
+                   .MaterializeAsync(repositoryRoot, currentCommit, cancellationToken)
+                   .ConfigureAwait(false))
+            using (var baselineRuntimeRoot = OwnedTemporaryDirectory.Create(repositoryRoot))
+            using (var currentRuntimeRoot = OwnedTemporaryDirectory.Create(repositoryRoot))
+            {
+                if (!baselineSnapshot.Commit.Equals(baselineCommit, StringComparison.Ordinal) ||
+                    !currentSnapshot.Commit.Equals(currentCommit, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        "Verified diff snapshots did not preserve their resolved immutable commits.");
+                }
+
+                var relativeTarget = Path.GetRelativePath(repositoryRoot, currentTarget);
+                var baselineTarget = MapVerifiedDiffTarget(
+                    baselineSnapshot.SnapshotDirectory,
+                    relativeTarget,
+                    "base");
+                var snapshotCurrentTarget = MapVerifiedDiffTarget(
+                    currentSnapshot.SnapshotDirectory,
+                    relativeTarget,
+                    "current");
+                var trustedOptions = ResolveTrustedDiffConfiguration(
+                    options,
+                    repositoryRoot,
+                    currentTarget,
+                    baselineSnapshot.SnapshotDirectory,
+                    baselineTarget);
+                var baselineOptions = CreateVerifiedDiffOptions(trustedOptions, baselineTarget);
+                var currentOptions = CreateVerifiedDiffOptions(trustedOptions, snapshotCurrentTarget);
+                var untrustedRoots = new[]
+                {
+                repositoryRoot,
+                baselineSnapshot.SnapshotDirectory,
+                currentSnapshot.SnapshotDirectory,
+            };
+                var baselineRuntime = CreateDiffRuntime(
+                    baselineRuntimeRoot.DirectoryPath,
+                    untrustedRoots,
+                    processRunner);
+                var currentRuntime = CreateDiffRuntime(
+                    currentRuntimeRoot.DirectoryPath,
+                    untrustedRoots,
+                    processRunner);
+
+                baseline = await AnalyzeAsync(
+                    baselineOptions,
+                    error,
+                    cancellationToken,
+                    baselineSnapshot.SnapshotDirectory,
+                    packagesDirectory: baselineRuntime.PackagesDirectory,
+                    processRunnerOverride: baselineRuntime.ProcessRunner).ConfigureAwait(false);
+                current = await AnalyzeAsync(
+                    currentOptions,
+                    error,
+                    cancellationToken,
+                    currentSnapshot.SnapshotDirectory,
+                    packagesDirectory: currentRuntime.PackagesDirectory,
+                    processRunnerOverride: currentRuntime.ProcessRunner).ConfigureAwait(false);
+                baselineSnapshot.EnsureTrackedFilesUnchanged();
+                currentSnapshot.EnsureTrackedFilesUnchanged();
+                comparison = AnalysisDiffComparer.Compare(
+                    baseline.Result,
+                    baselineSnapshot.SnapshotDirectory,
+                    current.Result,
+                    currentSnapshot.SnapshotDirectory,
+                    options.GitReference!,
+                    baselineCommit,
+                    baseline.Context.Policy.Impact);
+
+                comparison = comparison with
+                {
+                    Verification = await VerifyDiffSnapshotsAsync(
+                        options,
+                        baseline,
+                        baselineSnapshot.SnapshotDirectory,
+                        baselineRuntime.ProcessRunner,
+                        current,
+                        currentSnapshot.SnapshotDirectory,
+                        currentRuntime.ProcessRunner,
+                        comparison,
+                        baselineSnapshot.EnsureTrackedFilesUnchanged,
+                        currentSnapshot.EnsureTrackedFilesUnchanged,
+                        cancellationToken).ConfigureAwait(false),
+                };
+
+                if (options.ProvenanceOutputPath is not null &&
+                    comparison.Verification.Decision.Verdict != VerificationVerdict.Incomplete)
+                {
+                    provenance = await CreateAnalysisProvenanceAsync(
+                        baselineCommit,
+                        currentCommit,
+                        current,
+                        comparison,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception exception)
+        {
+            operationError = exception;
+            throw;
+        }
+        finally
+        {
+            await RevalidateCheckoutAsync(
+                repositoryRoot,
+                currentCommit,
+                workingTree,
+                commits,
+                operationError).ConfigureAwait(false);
+        }
+        if (options.ProvenanceOutputPath is not null)
+        {
+            if (provenance is null)
+            {
+                if (options.Verbosity != OutputVerbosity.Quiet)
+                {
+                    await error.WriteLineAsync(
+                        "Analysis provenance was not written because immutable verification evidence was incomplete.")
+                        .ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                await AtomicOutputFile.WriteAsync(
+                    options.ProvenanceOutputPath,
+                    provenance + "\n",
+                    cancellationToken).ConfigureAwait(false);
+                if (options.Verbosity != OutputVerbosity.Quiet)
+                {
+                    await error.WriteLineAsync(
+                        $"Wrote unsigned in-toto analysis evidence to {options.ProvenanceOutputPath}")
+                        .ConfigureAwait(false);
+                }
+            }
+        }
+
+        return await CompleteDiffAsync(
+            options,
+            current,
+            current.Context.RepositoryRoot,
+            baseline,
+            comparison,
+            output,
+            error,
+            cancellationToken).ConfigureAwait(false);
     }
 
     private static async Task<int> RunSimulationV2Async(
@@ -254,21 +539,52 @@ public static class Program
         var explicitCredentials = ReadExplicitCredentialEnvironment(options);
         var processRunner = new ProcessRunner();
         var worktreeInspector = new GitWorkingTreeInspector(processRunner);
+        var commitInspector = new GitCommitInspector(processRunner);
         await worktreeInspector.EnsureCleanAsync(repositoryRoot, cancellationToken).ConfigureAwait(false);
-        await worktreeInspector.EnsureArchiveSemanticsAreReproducibleAsync(repositoryRoot, cancellationToken)
+        var expectedCommit = await commitInspector.ResolveHeadAsync(repositoryRoot, cancellationToken)
             .ConfigureAwait(false);
-        var (report, exitCode) = await CreateSimulationReportAsync(
-            options,
-            repositoryRoot,
-            currentTarget,
-            explicitCredentials,
-            processRunner,
-            error,
-            cancellationToken).ConfigureAwait(false);
+        await commitInspector.EnsureVerificationTreeSupportedAsync(
+                repositoryRoot,
+                expectedCommit,
+                cancellationToken)
+            .ConfigureAwait(false);
+        await worktreeInspector.EnsureArchiveSemanticsAreReproducibleAsync(
+                repositoryRoot,
+                expectedCommit,
+                cancellationToken)
+            .ConfigureAwait(false);
+        DependencySimulationReport report;
+        int exitCode;
+        Exception? operationError = null;
+        try
+        {
+            (report, exitCode) = await CreateSimulationReportAsync(
+                options,
+                repositoryRoot,
+                currentTarget,
+                expectedCommit,
+                explicitCredentials,
+                processRunner,
+                error,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            operationError = exception;
+            throw;
+        }
+        finally
+        {
+            await RevalidateCheckoutAsync(
+                repositoryRoot,
+                expectedCommit,
+                worktreeInspector,
+                commitInspector,
+                operationError).ConfigureAwait(false);
+        }
 
         // The output file is the only intentional repository write and is produced after
         // both owned snapshots have been deleted and the original checkout revalidated.
-        await worktreeInspector.EnsureCleanAsync(repositoryRoot, cancellationToken).ConfigureAwait(false);
         var rendered = options.Format == OutputFormat.Json
             ? DependencySimulationSerializer.SerializeJson(report) + "\n"
             : DependencySimulationSerializer.SerializeText(report);
@@ -293,6 +609,7 @@ public static class Program
         CliOptions options,
         string repositoryRoot,
         string currentTarget,
+        string expectedCommit,
         IReadOnlyDictionary<string, string> explicitCredentials,
         IProcessRunner processRunner,
         TextWriter error,
@@ -303,7 +620,7 @@ public static class Program
         try
         {
             var baselineSnapshot = ownedBaseline = await new GitSnapshotProvider(processRunner)
-                    .MaterializeAsync(repositoryRoot, "HEAD", cancellationToken)
+                    .MaterializeAsync(repositoryRoot, expectedCommit, cancellationToken)
                     .ConfigureAwait(false);
             var candidateSnapshot = ownedCandidate = await new GitSnapshotProvider(processRunner)
                     .MaterializeAsync(repositoryRoot, baselineSnapshot.Commit, cancellationToken)
@@ -344,6 +661,7 @@ public static class Program
                 baselineSnapshot.SnapshotDirectory,
                 packagesDirectory: baselineRuntime.PackagesDirectory,
                 processRunnerOverride: baselineRuntime.ProcessRunner).ConfigureAwait(false);
+            baselineSnapshot.EnsureTrackedFilesUnchanged();
             if (baseline.HasOperationalError)
             {
                 throw new InvalidOperationException(
@@ -367,6 +685,7 @@ public static class Program
             {
                 ExpectedSourceSha256 = expectedSourceHash,
             });
+            candidateSnapshot.RecordExpectedTrackedFileMutation(edit.File);
             var lockedMode = ResolveSimulationLockedMode(
                 baseline.Result.ProjectSettings,
                 baselineSnapshot.SnapshotDirectory,
@@ -374,7 +693,7 @@ public static class Program
             var candidateDiscovery = new ProjectDiscovery().Discover(
                 candidateTarget,
                 candidateSnapshot.SnapshotDirectory);
-            var (candidateConfiguration, _, candidateConfigurationDirectory) = LoadConfiguration(
+            var (candidateConfiguration, _, candidateConfigurationDirectory, _) = LoadConfiguration(
                 candidateOptions,
                 candidateSnapshot.SnapshotDirectory);
             var restoreTimeout = AnalysisPolicyResolver.Resolve(
@@ -396,8 +715,10 @@ public static class Program
                 options.Verbosity == OutputVerbosity.Quiet ? null : message => error.WriteLine(message),
                 cancellationToken,
                 forceEvaluate: lockedMode == DependencySimulationLockedMode.NotEnabled,
-                candidateRuntime.PackagesDirectory).ConfigureAwait(false);
+                candidateRuntime.PackagesDirectory,
+                options.Verify is null ? null : options.VerificationConfiguration).ConfigureAwait(false);
             VerifySimulationMutationHash(candidateSnapshot.SnapshotDirectory, edit);
+            candidateSnapshot.EnsureTrackedFilesUnchanged();
 
             if (!candidateRestore.Succeeded)
             {
@@ -418,6 +739,7 @@ public static class Program
                 packagesDirectory: candidateRuntime.PackagesDirectory,
                 preparedRestore: candidateRestore,
                 processRunnerOverride: candidateRuntime.ProcessRunner).ConfigureAwait(false);
+            candidateSnapshot.EnsureTrackedFilesUnchanged();
             if (candidate.HasOperationalError)
             {
                 var report = CreateUnavailableSimulationReport(
@@ -460,6 +782,23 @@ public static class Program
                 return (report, 2);
             }
 
+            VerificationComparisonReport? executedVerification = null;
+            if (options.Verify is not null)
+            {
+                executedVerification = await VerifyDiffSnapshotsAsync(
+                    options,
+                    baseline,
+                    baselineSnapshot.SnapshotDirectory,
+                    baselineRuntime.ProcessRunner,
+                    candidate,
+                    candidateSnapshot.SnapshotDirectory,
+                    candidateRuntime.ProcessRunner,
+                    comparison,
+                    baselineSnapshot.EnsureTrackedFilesUnchanged,
+                    candidateSnapshot.EnsureTrackedFilesUnchanged,
+                    cancellationToken).ConfigureAwait(false);
+            }
+
             var resolutionError = ValidateCandidateResolution(
                 baseline.Result,
                 baselineSnapshot.SnapshotDirectory,
@@ -472,12 +811,36 @@ public static class Program
                 candidate,
                 candidateSnapshot.SnapshotDirectory,
                 resolutionError);
+            if (executedVerification?.Decision.Verdict == VerificationVerdict.Reject)
+            {
+                rejectionReasons = rejectionReasons
+                    .Append(DescribeVerificationRejection(executedVerification.Decision))
+                    .Distinct(StringComparer.Ordinal)
+                    .ToArray();
+            }
+
             var noChange = HasNoObservedSimulationImpact(comparison);
-            var verdict = rejectionReasons.Count > 0
-                ? DependencySimulationVerdict.Reject
-                : noChange
-                    ? DependencySimulationVerdict.NoChange
-                    : DependencySimulationVerdict.Pass;
+            var verificationIncomplete =
+                executedVerification?.Decision.Verdict == VerificationVerdict.Incomplete;
+            var verdict = verificationIncomplete
+                ? DependencySimulationVerdict.Incomplete
+                : rejectionReasons.Count > 0
+                    ? DependencySimulationVerdict.Reject
+                    : noChange
+                        ? DependencySimulationVerdict.NoChange
+                        : DependencySimulationVerdict.Pass;
+            var simulationVerification = DependencySimulationVerification.RestoreOnly(
+                DependencySimulationVerificationStatus.Passed,
+                options.AuditVulnerabilities,
+                options.AuditDeprecatedPackages,
+                lockedMode,
+                requestedLevel: options.Verify) with
+            {
+                Executed = executedVerification,
+                Build = ToSimulationStatus(executedVerification?.Candidate.Build.Stage),
+                Tests = ToSimulationStatus(executedVerification?.Candidate.Tests.Stage),
+                EvidenceLevel = ToSimulationEvidenceLevel(executedVerification?.Decision.CommonEvidenceLevel),
+            };
             var completedReport = new DependencySimulationReport(
                 DependencySimulationReport.CurrentSchemaVersion,
                 PackageMedicAnalyzer.Version,
@@ -487,16 +850,19 @@ public static class Program
                     WorkingTreeRequiredClean: true),
                 new DependencySimulationRequest(options.SimulationPackageId!, options.SimulationTargetVersion!),
                 DependencySimulationMutation.From(edit),
-                DependencySimulationVerification.RestoreOnly(
-                    DependencySimulationVerificationStatus.Passed,
-                    options.AuditVulnerabilities,
-                    options.AuditDeprecatedPackages,
-                    lockedMode),
+                simulationVerification,
                 CreateSimulationComparison(comparison),
                 verdict,
                 rejectionReasons,
-                []);
-            return (completedReport, verdict == DependencySimulationVerdict.Reject ? 1 : 0);
+                verificationIncomplete
+                    ? ["The requested build or test verification was incomplete."]
+                    : []);
+            return (completedReport, verdict switch
+            {
+                DependencySimulationVerdict.Reject => 1,
+                DependencySimulationVerdict.Incomplete => 2,
+                _ => 0,
+            });
         }
         catch (Exception operationError)
         {
@@ -664,34 +1030,405 @@ public static class Program
         IReadOnlyList<string> untrustedRoots,
         IProcessRunner processRunner)
     {
-        var packagesDirectory = Directory.CreateDirectory(Path.Combine(runtimeRoot, "nuget", "packages")).FullName;
-        var httpCache = Directory.CreateDirectory(Path.Combine(runtimeRoot, "nuget", "http-cache")).FullName;
-        var pluginCache = Directory.CreateDirectory(Path.Combine(runtimeRoot, "nuget", "plugins-cache")).FullName;
-        var dotnetHome = Directory.CreateDirectory(Path.Combine(runtimeRoot, "dotnet-home")).FullName;
-        var temporary = Directory.CreateDirectory(Path.Combine(runtimeRoot, "temp")).FullName;
-        var environment = ProcessEnvironment.CreateOverrides(
-            new Dictionary<string, string?>(OperatingSystem.IsWindows()
-                ? StringComparer.OrdinalIgnoreCase
-                : StringComparer.Ordinal)
-            {
-                ["NUGET_PACKAGES"] = packagesDirectory,
-                ["NUGET_HTTP_CACHE_PATH"] = httpCache,
-                ["NUGET_PLUGINS_CACHE_PATH"] = pluginCache,
-                ["DOTNET_CLI_HOME"] = dotnetHome,
-                ["TEMP"] = temporary,
-                ["TMP"] = temporary,
-                ["TMPDIR"] = temporary,
-                ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
-                ["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1",
-                ["DOTNET_NOLOGO"] = "1",
-                ["MSBUILDDISABLENODEREUSE"] = "1",
-                ["NUGET_XMLDOC_MODE"] = "skip",
-            },
+        var packagesDirectory = Path.Combine(runtimeRoot, "nuget", "packages");
+        var environment = ProcessEnvironment.CreateIsolatedDotNet(
+            runtimeRoot,
+            packagesDirectory,
             untrustedExecutableRoots: untrustedRoots);
         return new SimulationRuntime(
             new EnvironmentScopedProcessRunner(processRunner, environment),
             packagesDirectory);
     }
+
+    private static CliOptions CreateVerifiedDiffOptions(CliOptions options, string snapshotTarget) =>
+        options with
+        {
+            Path = snapshotTarget,
+            OutputPath = null,
+            SarifOutputPath = null,
+            SbomOutputPath = null,
+            ProvenanceOutputPath = null,
+            BaselinePath = null,
+            FailOnNew = null,
+            GitReference = null,
+        };
+
+    private static string MapVerifiedDiffTarget(
+        string snapshotRoot,
+        string relativeTarget,
+        string role)
+    {
+        var target = Path.GetFullPath(Path.Combine(snapshotRoot, relativeTarget));
+        EnsureWithinRepository(target, snapshotRoot, $"The verified {role} snapshot target");
+        if (!File.Exists(target) && !Directory.Exists(target))
+        {
+            throw new InvalidOperationException(
+                $"The verified diff target does not exist in the {role} commit.");
+        }
+
+        if (!ProjectDiscovery.IsSafelyContained(snapshotRoot, target))
+        {
+            throw new InvalidOperationException(
+                $"The verified {role} snapshot target crosses a symbolic-link boundary.");
+        }
+
+        return target;
+    }
+
+    private static async Task RevalidateCheckoutAsync(
+        string repositoryRoot,
+        string expectedCommit,
+        GitWorkingTreeInspector workingTree,
+        GitCommitInspector commits,
+        Exception? operationError)
+    {
+        Exception? integrityError = null;
+        using var validation = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        try
+        {
+            await workingTree.EnsureCleanAsync(repositoryRoot, validation.Token).ConfigureAwait(false);
+            await commits.EnsureHeadEqualsAsync(repositoryRoot, expectedCommit, validation.Token)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            integrityError = new InvalidOperationException(
+                "The original Git checkout could not be proven unchanged after verified execution; the environment is unsafe.",
+                exception);
+        }
+
+        if (integrityError is null)
+        {
+            return;
+        }
+
+        if (operationError is not null)
+        {
+            throw new AggregateException(
+                "Verified execution failed and the original Git checkout also failed integrity revalidation.",
+                operationError,
+                integrityError);
+        }
+
+        throw integrityError;
+    }
+
+    private static async Task<VerificationComparisonReport> VerifyDiffSnapshotsAsync(
+        CliOptions options,
+        PreparedAnalysis baseline,
+        string baselineRoot,
+        IProcessRunner baselineRunner,
+        PreparedAnalysis candidate,
+        string candidateRoot,
+        IProcessRunner candidateRunner,
+        AnalysisDiffReport comparison,
+        Action baselineIntegrityCheck,
+        Action candidateIntegrityCheck,
+        CancellationToken cancellationToken)
+    {
+        var level = options.Verify ?? VerificationLevel.Restore;
+        var baselineRestore = CreateRestoreVerificationEvidence(baseline);
+        var candidateRestore = CreateRestoreVerificationEvidence(candidate);
+        var baselineBuild = level == VerificationLevel.Restore ||
+                            baselineRestore.Status != VerificationStageStatus.Passed
+            ? NotRequestedBuild()
+            : await ExecuteBuildVerificationAsync(
+                options,
+                baseline,
+                baselineRoot,
+                baselineRunner,
+                cancellationToken).ConfigureAwait(false);
+        var candidateBuild = level == VerificationLevel.Restore ||
+                             candidateRestore.Status != VerificationStageStatus.Passed
+            ? NotRequestedBuild()
+            : await ExecuteBuildVerificationAsync(
+                options,
+                candidate,
+                candidateRoot,
+                candidateRunner,
+                cancellationToken).ConfigureAwait(false);
+        baselineIntegrityCheck();
+        candidateIntegrityCheck();
+
+        var baselineTests = level != VerificationLevel.Test ||
+                            baselineBuild.Stage.Status != VerificationStageStatus.Passed
+            ? NotRequestedTests()
+            : await ExecuteTestVerificationAsync(
+                options,
+                baseline,
+                baselineRoot,
+                baselineRunner,
+                cancellationToken).ConfigureAwait(false);
+        var candidateTests = level != VerificationLevel.Test ||
+                             candidateBuild.Stage.Status != VerificationStageStatus.Passed
+            ? NotRequestedTests()
+            : await ExecuteTestVerificationAsync(
+                options,
+                candidate,
+                candidateRoot,
+                candidateRunner,
+                cancellationToken).ConfigureAwait(false);
+        baselineIntegrityCheck();
+        candidateIntegrityCheck();
+        var baselineSnapshot = new VerificationSnapshotReport(
+            baselineRestore,
+            baselineBuild,
+            baselineTests);
+        var candidateSnapshot = new VerificationSnapshotReport(
+            candidateRestore,
+            candidateBuild,
+            candidateTests);
+        var decision = VerificationVerdictEngine.Compare(new VerificationComparisonInput(
+            level,
+            new VerificationSnapshotEvidence(
+                baselineRestore,
+                baselineBuild.Stage,
+                baselineTests.Stage),
+            new VerificationSnapshotEvidence(
+                candidateRestore,
+                candidateBuild.Stage,
+                candidateTests.Stage),
+            HasObservedDiffChange(comparison)));
+        return new VerificationComparisonReport(level, baselineSnapshot, candidateSnapshot, decision);
+    }
+
+    private static VerificationStageEvidence CreateRestoreVerificationEvidence(PreparedAnalysis analysis)
+        => CreateRestoreVerificationEvidence(
+            analysis.Restore,
+            analysis.HasOperationalError || analysis.Result.AnalysisErrors.Count > 0,
+            analysis.Result.ProjectSettings);
+
+    internal static VerificationStageEvidence CreateRestoreVerificationEvidence(
+        RestoreExecutionResult? restore,
+        bool analysisIncomplete,
+        IReadOnlyList<ProjectPackageSettings> projectSettings)
+    {
+        ArgumentNullException.ThrowIfNull(projectSettings);
+        if (restore is null)
+        {
+            return VerificationStageEvidence.Incomplete(VerificationFailureKind.AnalysisIncomplete);
+        }
+
+        if (!restore.Succeeded)
+        {
+            var lockedMode = projectSettings.Count == 0
+                ? DependencySimulationLockedMode.NotEnabled
+                : projectSettings.All(item => item.RestoreLockedMode)
+                    ? DependencySimulationLockedMode.Enforced
+                    : projectSettings.Any(item => item.RestoreLockedMode)
+                        ? DependencySimulationLockedMode.Mixed
+                        : DependencySimulationLockedMode.NotEnabled;
+            var failure = ClassifySimulationRestoreFailure(restore, lockedMode);
+            return failure switch
+            {
+                DependencySimulationRestoreFailureKind.PackageNotFound =>
+                    VerificationStageEvidence.Failed(VerificationFailureKind.PackageNotFound),
+                DependencySimulationRestoreFailureKind.VersionNotFound =>
+                    VerificationStageEvidence.Failed(VerificationFailureKind.VersionNotFound),
+                DependencySimulationRestoreFailureKind.DependencyConflict =>
+                    VerificationStageEvidence.Failed(VerificationFailureKind.DependencyConflict),
+                DependencySimulationRestoreFailureKind.LockedModeConflict =>
+                    VerificationStageEvidence.Failed(VerificationFailureKind.LockedModeConflict),
+                DependencySimulationRestoreFailureKind.SourceUnavailable =>
+                    VerificationStageEvidence.Incomplete(VerificationFailureKind.SourceUnavailable),
+                DependencySimulationRestoreFailureKind.AuthenticationFailed =>
+                    VerificationStageEvidence.Incomplete(VerificationFailureKind.AuthenticationFailed),
+                DependencySimulationRestoreFailureKind.TimedOut =>
+                    VerificationStageEvidence.Incomplete(VerificationFailureKind.TimedOut),
+                DependencySimulationRestoreFailureKind.OutputLimitExceeded =>
+                    VerificationStageEvidence.Incomplete(VerificationFailureKind.OutputLimitExceeded),
+                _ => VerificationStageEvidence.Incomplete(VerificationFailureKind.Unknown),
+            };
+        }
+
+        return analysisIncomplete
+            ? VerificationStageEvidence.Incomplete(VerificationFailureKind.AnalysisIncomplete)
+            : VerificationStageEvidence.Passed;
+    }
+
+    private static async Task<VerificationBuildReport> ExecuteBuildVerificationAsync(
+        CliOptions options,
+        PreparedAnalysis analysis,
+        string snapshotRoot,
+        IProcessRunner processRunner,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var plan = new VerificationPlanBuilder().Build(
+                analysis.Discovery,
+                analysis.EvaluatedProjects);
+            var timeout = TimeSpan.FromSeconds(options.BuildTimeoutSeconds ?? 900);
+            var result = await new BuildVerificationRunner(
+                    processRunner,
+                    timeout,
+                    TimeSpan.FromHours(1))
+                .RunAsync(
+                    plan,
+                    snapshotRoot,
+                    options.VerificationConfiguration,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            var blocking = result.Targets.LastOrDefault(item =>
+                item.Status is VerificationStageStatus.Failed or VerificationStageStatus.Incomplete);
+            return new VerificationBuildReport(
+                result.Evidence,
+                plan.BuildTargets.Count,
+                result.Targets.Count(item => item.Status == VerificationStageStatus.Passed),
+                blocking is null
+                    ? null
+                    : ToPortableDisplayPath(blocking.Target, snapshotRoot),
+                result.Errors.Count == 0
+                    ? null
+                    : ToPortableVerificationFailure(result.Errors[0], snapshotRoot));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or
+            InvalidDataException or
+            InvalidOperationException or
+            IOException or
+            UnauthorizedAccessException)
+        {
+            return new VerificationBuildReport(
+                VerificationStageEvidence.Incomplete(VerificationFailureKind.AnalysisIncomplete),
+                0,
+                0,
+                Failure: ToPortableVerificationFailure(exception.Message, snapshotRoot));
+        }
+    }
+
+    private static VerificationBuildReport NotRequestedBuild() => new(
+        VerificationStageEvidence.NotRequested,
+        0,
+        0);
+
+    private static async Task<VerificationTestReport> ExecuteTestVerificationAsync(
+        CliOptions options,
+        PreparedAnalysis analysis,
+        string snapshotRoot,
+        IProcessRunner processRunner,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var plan = new VerificationPlanBuilder().Build(
+                analysis.Discovery,
+                analysis.EvaluatedProjects);
+            var timeout = TimeSpan.FromSeconds(options.TestTimeoutSeconds ?? 1_200);
+            var result = await new TestVerificationRunner(
+                    processRunner,
+                    new TrxTestResultParser(),
+                    TrxTestResultLimits.Default,
+                    timeout,
+                    TimeSpan.FromHours(1))
+                .RunAsync(
+                    plan,
+                    snapshotRoot,
+                    options.VerificationConfiguration,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return new VerificationTestReport(
+                result.Evidence,
+                plan.TestProjects.Count,
+                result.Projects.Count(project => project.Status == VerificationStageStatus.Passed),
+                result.Total,
+                result.Passed,
+                result.Failed,
+                result.Skipped,
+                result.FailedTestIdentities,
+                result.HasAdditionalFailedTests,
+                result.Errors.Count == 0
+                    ? null
+                    : ToPortableVerificationFailure(result.Errors[0], snapshotRoot));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or
+            InvalidDataException or
+            InvalidOperationException or
+            IOException or
+            UnauthorizedAccessException)
+        {
+            return new VerificationTestReport(
+                VerificationStageEvidence.Incomplete(VerificationFailureKind.AnalysisIncomplete),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                [],
+                Failure: ToPortableVerificationFailure(exception.Message, snapshotRoot));
+        }
+    }
+
+    private static VerificationTestReport NotRequestedTests() => new(
+        VerificationStageEvidence.NotRequested,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        []);
+
+    private static bool HasObservedDiffChange(AnalysisDiffReport comparison) =>
+        comparison.Changes.Count > 0 ||
+        comparison.PackageChanges.Count > 0 ||
+        comparison.ProjectSettingsChanges.Count > 0 ||
+        comparison.RiskSummary.VulnerabilitiesIntroduced > 0 ||
+        comparison.RiskSummary.VulnerabilitiesResolved > 0 ||
+        comparison.RiskSummary.DeprecationsIntroduced > 0 ||
+        comparison.RiskSummary.DeprecationsResolved > 0;
+
+    private static string ToPortableVerificationFailure(string value, string snapshotRoot)
+    {
+        var sanitized = ProcessRunner.RedactSecrets(value)
+            .Replace(Path.GetFullPath(snapshotRoot), "%SNAPSHOT%", StringComparison.OrdinalIgnoreCase)
+            .Replace('\\', '/');
+        sanitized = string.Join(
+            ' ',
+            sanitized.Split(
+                ['\r', '\n'],
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        return sanitized.Length <= 4_096 ? sanitized : sanitized[..4_096];
+    }
+
+    private static DependencySimulationVerificationStatus ToSimulationStatus(
+        VerificationStageEvidence? evidence) => evidence?.Status switch
+        {
+            VerificationStageStatus.Passed => DependencySimulationVerificationStatus.Passed,
+            VerificationStageStatus.Failed => DependencySimulationVerificationStatus.Failed,
+            VerificationStageStatus.Incomplete => DependencySimulationVerificationStatus.Incomplete,
+            _ => DependencySimulationVerificationStatus.NotRun,
+        };
+
+    private static DependencySimulationEvidenceLevel ToSimulationEvidenceLevel(
+        VerificationEvidenceLevel? evidenceLevel) => evidenceLevel switch
+        {
+            VerificationEvidenceLevel.TestVerified => DependencySimulationEvidenceLevel.TestVerified,
+            VerificationEvidenceLevel.BuildVerified => DependencySimulationEvidenceLevel.BuildVerified,
+            _ => DependencySimulationEvidenceLevel.RestoreOnly,
+        };
+
+    private static string DescribeVerificationRejection(VerificationDecision decision) =>
+        decision.BlockingStage switch
+        {
+            VerificationStage.Build =>
+                "The candidate introduced a build failure after the baseline built successfully.",
+            VerificationStage.Test =>
+                "The candidate introduced a test failure after the baseline tests passed.",
+            VerificationStage.Restore =>
+                "The candidate introduced a deterministic restore failure after the baseline restored successfully.",
+            _ => "The candidate failed a requested verification stage that passed for the baseline.",
+        };
 
     private static IReadOnlyList<PackageInventoryItem> SelectAndMapSimulationPackages(
         IReadOnlyList<PackageInventoryItem> packages,
@@ -867,7 +1604,7 @@ public static class Program
                 relativeTarget,
                 edit,
                 lockedMode,
-                DependencySimulationVerificationStatus.Failed,
+                DependencySimulationVerificationStatus.Incomplete,
                 failureKind,
                 DependencySimulationVerdict.Incomplete,
                 [],
@@ -901,7 +1638,8 @@ public static class Program
                 auditedVulnerabilities: false,
                 auditedDeprecations: false,
                 lockedMode,
-                restoreFailureKind),
+                restoreFailureKind,
+                options.Verify),
             EmptySimulationComparison(unavailableReason),
             verdict,
             rejectionReasons,
@@ -960,30 +1698,97 @@ public static class Program
             return DependencySimulationRestoreFailureKind.OutputLimitExceeded;
         }
 
-        if (restore.Errors.Any(item =>
-                item.Contains("401", StringComparison.OrdinalIgnoreCase) ||
-                item.Contains("403", StringComparison.OrdinalIgnoreCase) ||
-                item.Contains("unauthorized", StringComparison.OrdinalIgnoreCase) ||
-                item.Contains("forbidden", StringComparison.OrdinalIgnoreCase)))
-            return DependencySimulationRestoreFailureKind.AuthenticationFailed;
-
-        var codes = restore.Diagnostics
-            .Select(item => item.OriginalCode)
-            .Where(item => item is not null)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        if (codes.Contains("NU1300") || codes.Contains("NU1301"))
-            return DependencySimulationRestoreFailureKind.SourceUnavailable;
-        if (lockedMode is DependencySimulationLockedMode.Enforced or DependencySimulationLockedMode.Mixed &&
-            (codes.Contains("NU1004") || codes.Contains("NU1005")))
+        if (restore.FailureKind != RestoreProcessFailureKind.Rejected || restore.Errors.Count == 0)
         {
-            return DependencySimulationRestoreFailureKind.LockedModeConflict;
+            return DependencySimulationRestoreFailureKind.Unknown;
         }
 
-        if (codes.Contains("NU1101")) return DependencySimulationRestoreFailureKind.PackageNotFound;
-        if (codes.Contains("NU1102")) return DependencySimulationRestoreFailureKind.VersionNotFound;
-        if (codes.Contains("NU1106") || codes.Contains("NU1107") || codes.Contains("NU1605"))
-            return DependencySimulationRestoreFailureKind.DependencyConflict;
-        return DependencySimulationRestoreFailureKind.Unknown;
+        if (restore.RejectedTargets.Count > 0)
+        {
+            var structured = restore.RejectedTargets
+                .Select(item => MapRestoreRejectionEvidence(item, lockedMode))
+                .Distinct()
+                .ToArray();
+            return structured.Length == 1
+                ? structured[0]
+                : DependencySimulationRestoreFailureKind.Unknown;
+        }
+
+        var classifiedErrors = restore.Errors
+            .Select(item => ClassifyRejectedRestoreError(item, lockedMode))
+            .Distinct()
+            .ToArray();
+        return classifiedErrors.Length == 1
+            ? classifiedErrors[0]
+            : DependencySimulationRestoreFailureKind.Unknown;
+    }
+
+    private static DependencySimulationRestoreFailureKind MapRestoreRejectionEvidence(
+        RestoreRejectionEvidenceKind evidence,
+        DependencySimulationLockedMode lockedMode) => evidence switch
+        {
+            RestoreRejectionEvidenceKind.AuthenticationFailed =>
+                DependencySimulationRestoreFailureKind.AuthenticationFailed,
+            RestoreRejectionEvidenceKind.SourceUnavailable =>
+                DependencySimulationRestoreFailureKind.SourceUnavailable,
+            RestoreRejectionEvidenceKind.LockFileConflict
+                when lockedMode is DependencySimulationLockedMode.Enforced or DependencySimulationLockedMode.Mixed =>
+                DependencySimulationRestoreFailureKind.LockedModeConflict,
+            RestoreRejectionEvidenceKind.PackageNotFound =>
+                DependencySimulationRestoreFailureKind.PackageNotFound,
+            RestoreRejectionEvidenceKind.VersionNotFound =>
+                DependencySimulationRestoreFailureKind.VersionNotFound,
+            RestoreRejectionEvidenceKind.DependencyConflict =>
+                DependencySimulationRestoreFailureKind.DependencyConflict,
+            _ => DependencySimulationRestoreFailureKind.Unknown,
+        };
+
+    private static DependencySimulationRestoreFailureKind ClassifyRejectedRestoreError(
+        string error,
+        DependencySimulationLockedMode lockedMode)
+    {
+        var candidates = new HashSet<DependencySimulationRestoreFailureKind>();
+        if (error.Contains("401 Unauthorized", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("403 Forbidden", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("unauthorized", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("forbidden", StringComparison.OrdinalIgnoreCase))
+        {
+            candidates.Add(DependencySimulationRestoreFailureKind.AuthenticationFailed);
+        }
+
+        if (error.Contains("NU1300", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("NU1301", StringComparison.OrdinalIgnoreCase))
+        {
+            candidates.Add(DependencySimulationRestoreFailureKind.SourceUnavailable);
+        }
+
+        if (lockedMode is DependencySimulationLockedMode.Enforced or DependencySimulationLockedMode.Mixed &&
+            (error.Contains("NU1004", StringComparison.OrdinalIgnoreCase) ||
+             error.Contains("NU1005", StringComparison.OrdinalIgnoreCase)))
+        {
+            candidates.Add(DependencySimulationRestoreFailureKind.LockedModeConflict);
+        }
+
+        if (error.Contains("NU1101", StringComparison.OrdinalIgnoreCase))
+        {
+            candidates.Add(DependencySimulationRestoreFailureKind.PackageNotFound);
+        }
+
+        if (error.Contains("NU1102", StringComparison.OrdinalIgnoreCase))
+        {
+            candidates.Add(DependencySimulationRestoreFailureKind.VersionNotFound);
+        }
+
+        if (error.Contains("NU1106", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("NU1107", StringComparison.OrdinalIgnoreCase) ||
+            error.Contains("NU1605", StringComparison.OrdinalIgnoreCase))
+        {
+            candidates.Add(DependencySimulationRestoreFailureKind.DependencyConflict);
+        }
+
+        return candidates.Count == 1
+            ? candidates.Single()
+            : DependencySimulationRestoreFailureKind.Unknown;
     }
 
     internal static bool IsDeterministicCandidateRejection(
@@ -1126,6 +1931,27 @@ public static class Program
             }
         }
 
+        if (options.SbomOutputPath is not null)
+        {
+            if (prepared.HasOperationalError || prepared.Result.AnalysisErrors.Count > 0)
+            {
+                if (options.Verbosity != OutputVerbosity.Quiet)
+                {
+                    await error.WriteLineAsync(
+                        "CycloneDX output was not written because dependency analysis was incomplete.")
+                        .ConfigureAwait(false);
+                }
+            }
+            else
+            {
+                await WriteSbomFileAsync(options.SbomOutputPath, prepared, cancellationToken).ConfigureAwait(false);
+                if (options.Verbosity != OutputVerbosity.Quiet)
+                {
+                    await error.WriteLineAsync($"Wrote CycloneDX 1.7 SBOM to {options.SbomOutputPath}").ConfigureAwait(false);
+                }
+            }
+        }
+
         if (options.OutputPath is null)
         {
             var rendered = options.Format switch
@@ -1196,6 +2022,71 @@ public static class Program
             await stream.WriteAsync(NewLineUtf8, token).ConfigureAwait(false);
         },
         cancellationToken);
+
+    private static Task WriteSbomFileAsync(
+        string path,
+        PreparedAnalysis prepared,
+        CancellationToken cancellationToken) => AtomicOutputFile.WriteAsync(
+        path,
+        async (stream, token) =>
+        {
+            await CycloneDxSbomSerializer.SerializeAsync(
+                stream,
+                prepared.Result,
+                prepared.Context.RepositoryRoot,
+                token).ConfigureAwait(false);
+        },
+        cancellationToken);
+
+    private static async Task<string> CreateAnalysisProvenanceAsync(
+        string baselineGitCommit,
+        string gitCommit,
+        PreparedAnalysis prepared,
+        AnalysisDiffReport comparison,
+        CancellationToken cancellationToken)
+    {
+        var configuration = prepared.ConfigurationSha256 is null
+            ? PackageMedicConfigurationFingerprint.None
+            : PackageMedicConfigurationFingerprint.FromSha256(
+                prepared.ConfigurationSha256);
+        byte[]? sbomBytes = null;
+        if (!prepared.HasOperationalError && prepared.Result.AnalysisErrors.Count == 0)
+        {
+            sbomBytes = await SerializeSbomBytesAsync(prepared, cancellationToken).ConfigureAwait(false);
+        }
+
+        var comparisonBytes = System.Text.Encoding.UTF8.GetBytes(
+            AnalysisDiffSerializer.SerializeJson(comparison));
+        var target = ToPortableDisplayPath(prepared.Result.Target, prepared.Context.RepositoryRoot) ?? ".";
+        var evidence = new PackageMedicAnalysisEvidence(
+            target,
+            baselineGitCommit,
+            Convert.ToHexString(SHA256.HashData(comparisonBytes)).ToLowerInvariant(),
+            PackageMedicAnalyzer.Version,
+            comparison.Verification!.Level,
+            comparison.Verification.Decision.Verdict,
+            PackageMedicAnalysisCompleteness.Complete,
+            configuration)
+        {
+            SbomSha256 = sbomBytes is null
+                ? null
+                : Convert.ToHexString(SHA256.HashData(sbomBytes)).ToLowerInvariant(),
+        };
+        return InTotoEvidenceSerializer.SerializePackageMedicAnalysisStatement(gitCommit, evidence);
+    }
+
+    private static async Task<byte[]> SerializeSbomBytesAsync(
+        PreparedAnalysis prepared,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = new MemoryStream();
+        await CycloneDxSbomSerializer.SerializeAsync(
+            stream,
+            prepared.Result,
+            prepared.Context.RepositoryRoot,
+            cancellationToken).ConfigureAwait(false);
+        return stream.ToArray();
+    }
 
     private static async Task<int> WriteBaselineAsync(
         CliOptions options,
@@ -1279,7 +2170,7 @@ public static class Program
             await output.WriteLineAsync($"Would review/remove: {diagnostic.Evidence} ({location})").ConfigureAwait(false);
         }
 
-        await output.WriteLineAsync($"Plan: {candidates.Length} candidate(s); apply is intentionally unavailable in 0.5.").ConfigureAwait(false);
+        await output.WriteLineAsync($"Plan: {candidates.Length} candidate(s); apply is intentionally unavailable in 0.6.").ConfigureAwait(false);
         return 0;
     }
 
@@ -1294,7 +2185,8 @@ public static class Program
         IProcessRunner? processRunnerOverride = null)
     {
         var repositoryRoot = repositoryRootOverride ?? FindRepositoryRoot(options.Path);
-        var (configuration, configurationPath, configurationDirectory) = LoadConfiguration(options, repositoryRoot);
+        var (configuration, configurationPath, configurationDirectory, configurationSha256) =
+            LoadConfiguration(options, repositoryRoot);
         var baselineOverride = options.BaselinePath is null ? null : Path.GetFullPath(options.BaselinePath);
         var policy = AnalysisPolicyResolver.Resolve(
             configuration,
@@ -1327,7 +2219,8 @@ public static class Program
             repositoryRoot,
             forceEvaluateRestore,
             packagesDirectory,
-            preparedRestore).ConfigureAwait(false);
+            preparedRestore,
+            options.Verify is null ? null : options.VerificationConfiguration).ConfigureAwait(false);
 
         if (options.AuditVulnerabilities)
         {
@@ -1350,15 +2243,17 @@ public static class Program
                 .Distinct(StringComparer.Ordinal)
                 .Order(StringComparer.Ordinal)
                 .ToArray();
-            outcome = new AnalysisOutcome(
-                outcome.Result with
+            outcome = outcome with
+            {
+                Result = outcome.Result with
                 {
                     Diagnostics = auditDiagnostics,
                     Summary = Recount(outcome.Result.Summary, auditDiagnostics),
                     AnalysisErrors = auditErrors,
                     Vulnerabilities = audit.Vulnerabilities,
                 },
-                outcome.HasOperationalError || audit.HasOperationalError);
+                HasOperationalError = outcome.HasOperationalError || audit.HasOperationalError,
+            };
         }
 
         if (options.AuditDeprecatedPackages)
@@ -1379,15 +2274,17 @@ public static class Program
                 .Distinct(StringComparer.Ordinal)
                 .Order(StringComparer.Ordinal)
                 .ToArray();
-            outcome = new AnalysisOutcome(
-                outcome.Result with
+            outcome = outcome with
+            {
+                Result = outcome.Result with
                 {
                     Diagnostics = auditDiagnostics,
                     Summary = Recount(outcome.Result.Summary, auditDiagnostics),
                     AnalysisErrors = auditErrors,
                     DeprecatedPackages = audit.DeprecatedPackages,
                 },
-                outcome.HasOperationalError || audit.HasOperationalError);
+                HasOperationalError = outcome.HasOperationalError || audit.HasOperationalError,
+            };
         }
 
         repositoryRoot = repositoryRootOverride ?? FindRepositoryRoot(outcome.Result.Target);
@@ -1408,7 +2305,14 @@ public static class Program
             application,
             comparison,
             ToPortableDisplayPath(policy.BaselinePath, repositoryRoot));
-        return new PreparedAnalysis(result, outcome.HasOperationalError, context);
+        return new PreparedAnalysis(
+            result,
+            outcome.HasOperationalError,
+            context,
+            outcome.Discovery ?? discovered,
+            outcome.EvaluatedProjects,
+            configurationSha256,
+            outcome.Restore);
     }
 
     private static Diagnostic[] MergeDiagnostics(
@@ -1446,6 +2350,74 @@ public static class Program
         return mapped;
     }
 
+    internal static CliOptions ResolveTrustedDiffConfiguration(
+        CliOptions options,
+        string currentRepositoryRoot,
+        string currentTarget,
+        string baselineRepositoryRoot,
+        string baselineTarget)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var currentRoot = Path.GetFullPath(currentRepositoryRoot);
+        var baselineRoot = Path.GetFullPath(baselineRepositoryRoot);
+        var normalizedCurrentTarget = Path.GetFullPath(currentTarget);
+        var normalizedBaselineTarget = Path.GetFullPath(baselineTarget);
+        EnsureWithinRepository(normalizedCurrentTarget, currentRoot, "The current diff target");
+        EnsureWithinRepository(normalizedBaselineTarget, baselineRoot, "The baseline diff target");
+
+        if (options.NoConfiguration)
+        {
+            return options with { ConfigurationPath = null, NoConfiguration = true };
+        }
+
+        string? trustedConfiguration;
+        if (options.ConfigurationPath is null)
+        {
+            trustedConfiguration = FindAutomaticConfiguration(normalizedBaselineTarget, baselineRoot);
+        }
+        else
+        {
+            var requested = Path.GetFullPath(options.ConfigurationPath);
+            var relative = Path.GetRelativePath(currentRoot, requested);
+            var isRepositoryOwned = !Path.IsPathFullyQualified(relative) &&
+                relative != ".." &&
+                !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
+                !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
+            if (!isRepositoryOwned)
+            {
+                // A configuration outside the analyzed repository can only have been
+                // selected explicitly by the caller. Treat it as invocation policy.
+                trustedConfiguration = requested;
+            }
+            else
+            {
+                if (!ProjectDiscovery.IsSafelyContained(currentRoot, requested))
+                {
+                    throw new InvalidOperationException(
+                        "The repository-owned diff configuration resolves through an unsafe symbolic link or junction.");
+                }
+
+                trustedConfiguration = Path.GetFullPath(Path.Combine(baselineRoot, relative));
+                EnsureWithinRepository(
+                    trustedConfiguration,
+                    baselineRoot,
+                    "The trusted baseline configuration");
+                if (!File.Exists(trustedConfiguration) ||
+                    !ProjectDiscovery.IsSafelyContained(baselineRoot, trustedConfiguration))
+                {
+                    throw new InvalidOperationException(
+                        "The explicit repository-owned diff configuration must be a tracked regular file in the base revision.");
+                }
+            }
+        }
+
+        return options with
+        {
+            ConfigurationPath = trustedConfiguration,
+            NoConfiguration = trustedConfiguration is null,
+        };
+    }
+
     private static string PackageContext(PackageInventoryItem item, string repositoryRoot) => string.Join(
         '\n',
         DiagnosticFingerprint.GetRelativePath(item.Project, repositoryRoot) ?? Path.GetFileName(item.Project),
@@ -1453,13 +2425,17 @@ public static class Program
         item.RuntimeIdentifier?.ToUpperInvariant() ?? string.Empty,
         item.Id.ToUpperInvariant());
 
-    private static (PackageMedicConfiguration Configuration, string? Path, string Directory) LoadConfiguration(
+    private static (
+        PackageMedicConfiguration Configuration,
+        string? Path,
+        string Directory,
+        string? Sha256) LoadConfiguration(
         CliOptions options,
         string repositoryRoot)
     {
         if (options.NoConfiguration)
         {
-            return (PackageMedicConfiguration.Default, null, repositoryRoot);
+            return (PackageMedicConfiguration.Default, null, repositoryRoot, null);
         }
 
         var configurationPath = options.ConfigurationPath is null
@@ -1467,13 +2443,15 @@ public static class Program
             : Path.GetFullPath(options.ConfigurationPath);
         if (configurationPath is null)
         {
-            return (PackageMedicConfiguration.Default, null, repositoryRoot);
+            return (PackageMedicConfiguration.Default, null, repositoryRoot, null);
         }
 
+        var loaded = PackageMedicConfigurationLoader.LoadWithSha256(configurationPath);
         return (
-            PackageMedicConfigurationLoader.Load(configurationPath),
+            loaded.Configuration,
             configurationPath,
-            Path.GetDirectoryName(configurationPath) ?? repositoryRoot);
+            Path.GetDirectoryName(configurationPath) ?? repositoryRoot,
+            loaded.Sha256);
     }
 
     private static string? FindAutomaticConfiguration(string? requestedPath, string repositoryRoot)
@@ -1598,14 +2576,27 @@ public static class Program
 
     private static void ValidateOutputPaths(CliOptions options)
     {
-        if (options.OutputPath is null || options.SarifOutputPath is null)
+        var paths = new (string Option, string Path)[]
         {
-            return;
+            ("--output", options.OutputPath ?? string.Empty),
+            ("--sarif-output", options.SarifOutputPath ?? string.Empty),
+            ("--sbom-output", options.SbomOutputPath ?? string.Empty),
+            ("--provenance-output", options.ProvenanceOutputPath ?? string.Empty),
         }
+        .Where(item => item.Path.Length > 0)
+        .Select(item => (item.Option, Path: Path.GetFullPath(item.Path)))
+        .ToArray();
 
-        if (PathsEqual(Path.GetFullPath(options.OutputPath), Path.GetFullPath(options.SarifOutputPath)))
+        for (var first = 0; first < paths.Length; first++)
         {
-            throw new ArgumentException("--output and --sarif-output must use different paths.");
+            for (var second = first + 1; second < paths.Length; second++)
+            {
+                if (PathsEqual(paths[first].Path, paths[second].Path))
+                {
+                    throw new ArgumentException(
+                        $"{paths[first].Option} and {paths[second].Option} must use different paths.");
+                }
+            }
         }
     }
 
@@ -1707,6 +2698,7 @@ public static class Program
           package-medic audit [path] [options]
           package-medic diff <git-ref> [path] [options]
           package-medic simulate <package-id> --to <exact-version> [path] [options]
+          package-medic sbom [path] --output <file> [options]
           package-medic init [directory|file] [--force]
           package-medic baseline create [path] --output <file> [options]
           package-medic baseline update [path] [--baseline <file>] [--output <file>] [options]
@@ -1730,6 +2722,7 @@ public static class Program
           --format text|json|sarif     Output format (default: text)
           --output, -o <path>          Write the selected report
           --sarif-output <path>        Also write SARIF from the same analysis
+          --sbom-output <path>         Also write a deterministic CycloneDX 1.7 NuGet SBOM
           --fail-on none|warning|error Fail on any effective diagnostic
           --fail-on-new none|warning|error
                                        Fail only on diagnostics absent from baseline
@@ -1743,8 +2736,18 @@ public static class Program
         Diff behavior:
           Compares the working tree with a safely materialized Git reference.
           Reports findings, upgrades/downgrades, dependency-risk deltas, and CPM changes.
+          --provenance-output <path>  Write unsigned in-toto evidence for verified immutable diff
           --baseline and --fail-on-new are intentionally not accepted by diff.
           --no-restore requires usable assets files tracked in both compared trees.
+
+        Verified experiments (diff and simulate):
+          --verify restore|build|test  Opt into ordered verification; test implies build+restore
+          --build-timeout <seconds>   Per-build-target timeout, 1-3600 (default: 900)
+          --test-timeout <seconds>    Per-test-project timeout, 1-3600 (default: 1200)
+          --verification-configuration <name>
+                                       Build configuration (default: Release)
+          Build and test verification execute repository-controlled code only in independent,
+          disposable commit snapshots with separate caches and a minimal process environment.
 
         Dependency Time Machine:
           Restore-validates one exact package version in two independent snapshots of HEAD.
@@ -1754,20 +2757,28 @@ public static class Program
           --audit / --deprecated       Include matching risk deltas when both analyses complete
           --credential-env <name>      Explicitly inherit and redact one private-feed variable;
                                        repeat for additional variables
-          Build, tests, and runtime compatibility are not evaluated. Restore still evaluates
-          repository-controlled MSBuild content and may contact configured package sources.
+          Build and tests are not evaluated unless --verify requests them. Runtime compatibility
+          is never claimed. Restore may contact configured package sources.
           --no-restore, baselines, --fail-on-new, and SARIF are intentionally unavailable.
+
+        CycloneDX SBOM:
+          Generates deterministic CycloneDX 1.7 JSON from one complete dependency analysis.
+          `sbom` requires --output and does not write a second human/JSON scan report.
 
         Exit codes:
           0  Analysis completed below the configured thresholds
           1  A configured gate was reached or a simulated candidate was rejected
           2  Usage, restore, configuration, or analysis error
 
-        PackageMedic 0.5 remains read-only. clean only supports --dry-run.
+        PackageMedic 0.6 remains read-only. clean only supports --dry-run.
         """;
 
     private sealed record PreparedAnalysis(
         AnalysisResult Result,
         bool HasOperationalError,
-        AnalysisReportContext Context);
+        AnalysisReportContext Context,
+        DiscoveryResult Discovery,
+        IReadOnlyList<EvaluatedProject> EvaluatedProjects,
+        string? ConfigurationSha256,
+        RestoreExecutionResult? Restore);
 }

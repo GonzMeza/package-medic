@@ -1,3 +1,4 @@
+import Link from "next/link";
 import CodeBlock from "../code-block";
 import { Callout, DocPage, OptionTable, PageLinks } from "../components";
 import { simulationJsonExample } from "../simulation-example";
@@ -35,14 +36,14 @@ package-medic doctor . --format json \
         <p>
           The stable camel-cased document contains <code>version</code>, <code>target</code>, scan
           <code>summary</code>, <code>diagnostics</code>, and <code>analysisErrors</code>. PackageMedic
-          0.5 also provides resolved <code>packages</code>, <code>projectSettings</code>,
+          0.6 also provides resolved <code>packages</code>, <code>projectSettings</code>,
           <code>dependencyPaths</code>, <code>vulnerabilities</code>,
           <code>deprecatedPackages</code>, policy metadata, suppressed and resolved diagnostics,
-          and a structured schema-v2 <code>diff</code> object in Git mode.
+          and a structured schema-v3 <code>diff</code> object in Git mode.
         </p>
         <CodeBlock label="JSON shape">{`{
   "schemaVersion": 1,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "target": "./MySolution.sln",
   "summary": { "errors": 0, "warnings": 1, "information": 0 },
   "analysisErrors": [],
@@ -67,7 +68,7 @@ package-medic doctor . --format json \
         </p>
         <CodeBlock label="JSON shape">{`{
   "diff": {
-    "schemaVersion": 2,
+    "schemaVersion": 3,
     "impact": {
       "gatePassed": false,
       "summary": {
@@ -96,17 +97,34 @@ package-medic doctor . --format json \
       <section id="simulation-json">
         <h2>Dependency Time Machine JSON</h2>
         <p>
-          <code>simulate</code> uses a separate schema version 1 so hypothetical evidence cannot be
+          <code>simulate</code> uses a separate schema version 2 so hypothetical evidence cannot be
           confused with an observed scan. It separates repository, request, mutation, verification,
           comparison, rejection reasons, and operational errors.
         </p>
-        <CodeBlock label="Complete schema-v1 example">{simulationJsonExample}</CodeBlock>
+        <CodeBlock label="Complete schema-v2 example">{simulationJsonExample}</CodeBlock>
         <Callout title="Hypothetical results do not become source findings">
           <p>
             Simulation reports contain no timestamps or temporary paths and are never emitted as
-            SARIF. The GitHub Action does not upload hypothetical results in 0.5.
+            SARIF. The GitHub Action does not upload hypothetical simulation results.
           </p>
         </Callout>
+      </section>
+
+      <section id="verified-experiment-reports">
+        <h2>Verified evidence contracts</h2>
+        <p>
+          In PackageMedic 0.6, verified <code>diff</code> uses diff schema version 3 and
+          adds a structured <code>verification</code> comparison. Verified <code>simulate</code> uses
+          simulation schema version 2 and records its executed verification alongside the existing
+          restore and graph comparison. The report carries stage status, bounded counts, failed-test
+          identities, evidence level, blocking stage, and verdict; raw TRX files are not exported.
+        </p>
+        <p>
+          CycloneDX and unsigned in-toto evidence are separate output contracts rather than fields
+          pasted into the main scan report. See{" "}
+          <Link href="/docs/verified-experiments">Verified experiments</Link> for supported commands,
+          completeness rules, and the limits of each format.
+        </p>
       </section>
 
       <section id="sarif">

@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -109,11 +110,13 @@ public static class PackageMedicConfigurationLoader
         },
     };
 
-    public static PackageMedicConfiguration Load(string path)
+    public static PackageMedicConfiguration Load(string path) => LoadWithSha256(path).Configuration;
+
+    public static (PackageMedicConfiguration Configuration, string Sha256) LoadWithSha256(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
-        string json;
+        byte[] bytes;
         try
         {
             using var stream = new FileStream(
@@ -129,13 +132,8 @@ public static class PackageMedicConfigurationLoader
                     $"Invalid PackageMedic configuration '{path}': the file exceeds the {MaximumConfigurationCharacters}-byte safety limit.");
             }
 
-            using var reader = new StreamReader(
-                stream,
-                Encoding.UTF8,
-                detectEncodingFromByteOrderMarks: true,
-                bufferSize: 16 * 1024,
-                leaveOpen: false);
-            json = reader.ReadToEnd();
+            bytes = new byte[checked((int)stream.Length)];
+            stream.ReadExactly(bytes);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
@@ -144,7 +142,20 @@ public static class PackageMedicConfigurationLoader
                 exception);
         }
 
-        return Parse(json, path);
+        string json;
+        using (var memory = new MemoryStream(bytes, writable: false))
+        using (var reader = new StreamReader(
+                memory,
+                Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: true,
+                bufferSize: 16 * 1024,
+                leaveOpen: false))
+        {
+            json = reader.ReadToEnd();
+        }
+
+        var fingerprint = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+        return (Parse(json, path), fingerprint);
     }
 
     public static PackageMedicConfiguration Parse(string json, string sourceName = ".packagemedic.json")

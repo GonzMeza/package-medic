@@ -187,7 +187,7 @@ public sealed class DependencySimulationTests
         Assert.DoesNotContain("token=private", first, StringComparison.Ordinal);
         using var json = JsonDocument.Parse(first);
         var root = json.RootElement;
-        Assert.Equal(1, root.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(DependencySimulationReport.CurrentSchemaVersion, root.GetProperty("schemaVersion").GetInt32());
         Assert.Equal("dependencySimulation", root.GetProperty("kind").GetString());
         Assert.Equal(new string('a', 40), root.GetProperty("repository").GetProperty("headCommit").GetString());
         Assert.Equal("src/App/App.csproj", root.GetProperty("repository").GetProperty("analysisTarget").GetString());
@@ -289,6 +289,91 @@ public sealed class DependencySimulationTests
             .EnumerateArray().Select(item => item.GetString()!).ToArray();
         Assert.Equal(["notEnabled", "enforced", "mixed"], lockedModes);
         Assert.DoesNotContain("temporarilyRelaxed", lockedModes);
+    }
+
+    [Fact]
+    public void PublishedSimulationSchemaMatchesStructuredVerificationContract()
+    {
+        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "PackageMedic.sln")))
+        {
+            directory = directory.Parent;
+        }
+
+        Assert.NotNull(directory);
+        using var schema = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(directory!.FullName, "schemas", "packagemedic-simulation.schema.json")));
+
+        var restore = VerificationStageEvidence.Passed;
+        var build = new VerificationBuildReport(
+            VerificationStageEvidence.Passed,
+            PlannedTargets: 1,
+            CompletedTargets: 1);
+        var tests = new VerificationTestReport(
+            VerificationStageEvidence.Passed,
+            PlannedProjects: 1,
+            CompletedProjects: 1,
+            Total: 3,
+            Passed: 2,
+            Failed: 0,
+            Skipped: 1,
+            FailedTestIdentities: []);
+        var snapshot = new VerificationSnapshotReport(restore, build, tests);
+        var decision = VerificationVerdictEngine.Compare(new VerificationComparisonInput(
+            VerificationLevel.Test,
+            new VerificationSnapshotEvidence(restore, build.Stage, tests.Stage),
+            new VerificationSnapshotEvidence(restore, build.Stage, tests.Stage),
+            HasDependencyChange: true));
+        var executed = new VerificationComparisonReport(
+            VerificationLevel.Test,
+            snapshot,
+            snapshot,
+            decision);
+        var original = CreateReport(["src/App/App.csproj"]);
+        var report = original with
+        {
+            Verification = original.Verification with
+            {
+                Build = DependencySimulationVerificationStatus.Passed,
+                Tests = DependencySimulationVerificationStatus.Passed,
+                EvidenceLevel = DependencySimulationEvidenceLevel.TestVerified,
+                RequestedLevel = VerificationLevel.Test,
+                Executed = executed,
+            },
+        };
+
+        using var serialized = JsonDocument.Parse(DependencySimulationSerializer.SerializeJson(report));
+        var definitions = schema.RootElement.GetProperty("$defs");
+        var serializedVerification = serialized.RootElement.GetProperty("verification");
+        var serializedExecuted = serializedVerification.GetProperty("executed");
+
+        Assert.Equal(2, schema.RootElement.GetProperty("properties")
+            .GetProperty("schemaVersion").GetProperty("const").GetInt32());
+        Assert.Equal("testVerified", serializedVerification.GetProperty("evidenceLevel").GetString());
+        AssertRequiredPropertiesMatch(
+            schema.RootElement.GetProperty("properties").GetProperty("verification"),
+            serializedVerification);
+        AssertRequiredPropertiesMatch(
+            definitions.GetProperty("verificationComparison"),
+            serializedExecuted);
+        AssertRequiredPropertiesMatch(
+            definitions.GetProperty("verificationSnapshot"),
+            serializedExecuted.GetProperty("candidate"));
+        AssertRequiredPropertiesMatch(
+            definitions.GetProperty("verificationBuildReport"),
+            serializedExecuted.GetProperty("candidate").GetProperty("build"));
+        AssertRequiredPropertiesMatch(
+            definitions.GetProperty("verificationTestReport"),
+            serializedExecuted.GetProperty("candidate").GetProperty("tests"));
+        AssertRequiredPropertiesMatch(
+            definitions.GetProperty("verificationDecision"),
+            serializedExecuted.GetProperty("decision"));
+        AssertRequiredPropertiesMatch(
+            definitions.GetProperty("stageEvidence"),
+            serializedExecuted.GetProperty("candidate").GetProperty("restore"));
+        Assert.Equal("pass", serializedExecuted.GetProperty("decision").GetProperty("verdict").GetString());
+        Assert.True(serializedExecuted.GetProperty("decision").GetProperty("isComplete").GetBoolean());
+        Assert.True(serializedExecuted.GetProperty("decision").GetProperty("isAccepted").GetBoolean());
     }
 
     [Fact]
@@ -445,6 +530,27 @@ public sealed class DependencySimulationTests
         DependencySimulationVerdict.Pass,
         [],
         []);
+
+    private static void AssertRequiredPropertiesMatch(JsonElement contract, JsonElement value)
+    {
+        var required = contract.GetProperty("required")
+            .EnumerateArray()
+            .Select(item => item.GetString()!)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var serializedRequired = value.EnumerateObject()
+            .Select(property => property.Name)
+            .Where(required.Contains)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var allowed = contract.GetProperty("properties")
+            .EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+
+        Assert.Equal(required, serializedRequired);
+        Assert.All(value.EnumerateObject(), property => Assert.Contains(property.Name, allowed));
+    }
 
     private sealed class RecordingProcessRunner(ProcessResult result) : IProcessRunner
     {

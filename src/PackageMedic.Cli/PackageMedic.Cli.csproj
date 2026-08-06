@@ -12,7 +12,7 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageIcon>packagemedic-icon.png</PackageIcon>
     <PackageProjectUrl>https://github.com/GonzMeza/package-medic</PackageProjectUrl>
-    <PackageReleaseNotes>PackageMedic 0.5 adds Dependency Time Machine restore simulation, PR-aware GitHub Action analysis, PM008 deprecation diagnostics, semantic package direction, and dependency risk deltas while leaving the checkout unchanged. Full notes: https://github.com/GonzMeza/package-medic/blob/v$(PackageMedicVersion)/CHANGELOG.md</PackageReleaseNotes>
+    <PackageReleaseNotes>PackageMedic 0.6 adds opt-in immutable restore/build/test verification, deterministic CycloneDX 1.7 SBOM output, and unsigned in-toto analysis evidence while leaving the checkout unchanged. Full notes: https://github.com/GonzMeza/package-medic/blob/v$(PackageMedicVersion)/CHANGELOG.md</PackageReleaseNotes>
     <PackageTags>dotnet;nuget;dependencies;msbuild;central-package-management;dotnet-tool;sarif;github-actions;code-scanning;ci;baseline;dependency-policy;vulnerability-audit;deprecated-packages;dependency-diff;dependency-simulation;pull-request</PackageTags>
     <Description>A read-only dependency doctor and restore-validated package simulator for SDK-style .NET projects.</Description>
     <Title>PackageMedic</Title>

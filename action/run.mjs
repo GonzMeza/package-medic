@@ -9,6 +9,7 @@ import {
   escapeCommandData,
   escapeMarkdown,
   isolatedName,
+  isVerifiedRestoreRejection,
   isWithin,
   normalizeActionInstance,
   parseAnnotationMode,
@@ -45,6 +46,8 @@ function emitFailure(message, outputDirectory, artifactName, sarifCategory) {
   setOutput('exit-code', 2);
   setOutput('json-file', path.join(outputDirectory, 'packagemedic.json'));
   setOutput('sarif-file', path.join(outputDirectory, 'packagemedic.sarif'));
+  setOutput('sbom-file', path.join(outputDirectory, 'packagemedic.cdx.json'));
+  setOutput('provenance-file', path.join(outputDirectory, 'packagemedic.intoto.json'));
   setOutput('errors', 0);
   setOutput('warnings', 0);
   setOutput('information', 0);
@@ -57,8 +60,15 @@ function emitFailure(message, outputDirectory, artifactName, sarifCategory) {
     'deprecations-introduced', 'deprecations-resolved', 'deprecations-persistent',
     'impact-violations', 'impact-added-direct', 'impact-added-transitive',
     'impact-max-blast-radius', 'impact-source-changes', 'impact-content-changes',
+    'tests-passed', 'tests-failed', 'tests-skipped',
   ]) setOutput(output, 0);
   setOutput('impact-gate-passed', '');
+  setOutput('verification-status', '');
+  setOutput('build-regression', false);
+  setOutput('test-regression', false);
+  setOutput('verification-incomplete', false);
+  setOutput('provenance-created', false);
+  setOutput('sbom-created', false);
   setOutput('artifact-name', artifactName);
   setOutput('sarif-category', sarifCategory);
   setOutput('report-created', false);
@@ -106,6 +116,28 @@ try {
     process.env.PACKAGEMEDIC_DIFF_BASE,
     process.env.PACKAGEMEDIC_GITHUB_EVENT_NAME,
     process.env.PACKAGEMEDIC_PR_BASE_SHA);
+  const verifyInput = String(process.env.PACKAGEMEDIC_VERIFY ?? '').trim();
+  const verify = verifyInput
+    ? enumValue(verifyInput, 'verify', ['restore', 'build', 'test'])
+    : undefined;
+  const buildTimeoutInput = String(process.env.PACKAGEMEDIC_BUILD_TIMEOUT ?? '').trim();
+  const testTimeoutInput = String(process.env.PACKAGEMEDIC_TEST_TIMEOUT ?? '').trim();
+  const parseOptionalTimeout = (value, name) => {
+    if (!value) return undefined;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 3600) {
+      throw new Error(`${name} must be an integer between 1 and 3600.`);
+    }
+    return parsed;
+  };
+  const buildTimeout = parseOptionalTimeout(buildTimeoutInput, 'build-timeout');
+  const testTimeout = parseOptionalTimeout(testTimeoutInput, 'test-timeout');
+  const verificationConfiguration = String(
+    process.env.PACKAGEMEDIC_VERIFICATION_CONFIGURATION || 'Release').trim();
+  const allowSelfHostedVerification = parseBoolean(
+    process.env.PACKAGEMEDIC_ALLOW_SELF_HOSTED_VERIFICATION,
+    'allow-self-hosted-verification');
+  const runnerEnvironment = String(process.env.PACKAGEMEDIC_RUNNER_ENVIRONMENT ?? '').trim().toLowerCase();
   const annotationMode = parseAnnotationMode(process.env.PACKAGEMEDIC_ANNOTATIONS);
   parseBoolean(process.env.PACKAGEMEDIC_UPLOAD_SARIF, 'upload-sarif');
   parseBoolean(process.env.PACKAGEMEDIC_UPLOAD_ARTIFACT, 'upload-artifact');
@@ -128,6 +160,24 @@ try {
   const baselineFile = resolveOptionalWorkspaceFile(workspace, process.env.PACKAGEMEDIC_BASELINE, 'baseline');
   if (diffBase && baselineFile) throw new Error('baseline cannot be combined with diff-base.');
   if (diffBase && failOnNew) throw new Error('fail-on-new cannot be combined with diff-base; diff already gates changed findings.');
+  if (verify && !diffBase) throw new Error('verify requires diff mode and an immutable comparison base.');
+  if (verify && !restore) throw new Error('verify requires restore=true for independent snapshot restores.');
+  if (!verify && (buildTimeout !== undefined || testTimeout !== undefined)) {
+    throw new Error('build-timeout and test-timeout require verify.');
+  }
+  if (verify === 'restore' && (buildTimeout !== undefined || testTimeout !== undefined)) {
+    throw new Error('restore-only verification does not accept build or test timeouts.');
+  }
+  if (verify === 'build' && testTimeout !== undefined) {
+    throw new Error('test-timeout requires verify: test.');
+  }
+  if (verify && !/^[0-9A-Za-z._-]{1,64}$/u.test(verificationConfiguration)) {
+    throw new Error('verification-configuration must use 1-64 letters, digits, dots, underscores, or hyphens.');
+  }
+  if (verify && verify !== 'restore' && runnerEnvironment === 'self-hosted' && !allowSelfHostedVerification) {
+    throw new Error(
+      'Build/test verification on a self-hosted runner requires allow-self-hosted-verification: true and an independently secured execution boundary.');
+  }
   if (diffBase && !restore) {
     process.stdout.write(
       '::warning title=PackageMedic diff assets::restore=false requires usable assets files tracked in both compared Git trees.\n');
@@ -162,6 +212,8 @@ try {
 
   const jsonFile = path.join(outputDirectory, 'packagemedic.json');
   const sarifFile = path.join(outputDirectory, 'packagemedic.sarif');
+  const sbomFile = path.join(outputDirectory, 'packagemedic.cdx.json');
+  const provenanceFile = path.join(outputDirectory, 'packagemedic.intoto.json');
   const baseArguments = diffBase
     ? ['diff', diffBase, scanPath, '--verbosity', verbosity]
     : ['doctor', scanPath, '--verbosity', verbosity];
@@ -177,6 +229,13 @@ try {
   if (!diffBase && baselineFile) baseArguments.push('--baseline', baselineFile);
   if (!diffBase && failOnNew) baseArguments.push('--fail-on-new', failOnNew);
   if (maxParallelism !== undefined) baseArguments.push('--max-parallelism', String(maxParallelism));
+  baseArguments.push('--sbom-output', sbomFile);
+  if (verify) {
+    baseArguments.push('--verify', verify, '--verification-configuration', verificationConfiguration);
+    baseArguments.push('--provenance-output', provenanceFile);
+    if (buildTimeout !== undefined) baseArguments.push('--build-timeout', String(buildTimeout));
+    if (testTimeout !== undefined) baseArguments.push('--test-timeout', String(testTimeout));
+  }
   const scanExit = runCommand(executable, [
     ...baseArguments,
     '--format', 'json',
@@ -198,7 +257,10 @@ try {
     }
   }
 
-  const reportsComplete = report && existsSync(sarifFile);
+  const sbomRequired = !isVerifiedRestoreRejection(report);
+  const reportsComplete = report && existsSync(sarifFile) &&
+    (!sbomRequired || existsSync(sbomFile)) &&
+    (!verify || existsSync(provenanceFile));
   const exitCode = reportsComplete && (scanExit === 0 || scanExit === 1) ? scanExit : 2;
   if (report) appendSummary(renderSummary(report, details, exitCode, workspace));
   else appendSummary(`## PackageMedic\n\n**Operational error** — the JSON report was not created.\n`);
@@ -206,6 +268,8 @@ try {
   setOutput('exit-code', exitCode);
   setOutput('json-file', jsonFile);
   setOutput('sarif-file', sarifFile);
+  setOutput('sbom-file', sbomFile);
+  setOutput('provenance-file', provenanceFile);
   setOutput('errors', details.counts.errors);
   setOutput('warnings', details.counts.warnings);
   setOutput('information', details.counts.information);
@@ -233,9 +297,19 @@ try {
   setOutput('impact-max-blast-radius', details.diff?.impact?.maximumBlastRadius ?? 0);
   setOutput('impact-source-changes', details.diff?.impact?.sourceChanges ?? 0);
   setOutput('impact-content-changes', details.diff?.impact?.contentChanges ?? 0);
+  setOutput('verification-status', details.diff?.verification?.status ?? '');
+  setOutput('build-regression', details.diff?.verification?.buildRegression ?? false);
+  setOutput('test-regression', details.diff?.verification?.testRegression ?? false);
+  setOutput('tests-passed', details.diff?.verification?.testsPassed ?? 0);
+  setOutput('tests-failed', details.diff?.verification?.testsFailed ?? 0);
+  setOutput('tests-skipped', details.diff?.verification?.testsSkipped ?? 0);
+  setOutput('verification-incomplete', details.diff?.verification?.incomplete ?? false);
+  setOutput('provenance-created', existsSync(provenanceFile));
+  setOutput('sbom-created', existsSync(sbomFile));
   setOutput('artifact-name', artifactName);
   setOutput('sarif-category', sarifCategory);
-  setOutput('report-created', existsSync(jsonFile) || existsSync(sarifFile));
+  setOutput('report-created', existsSync(jsonFile) || existsSync(sarifFile) ||
+    existsSync(sbomFile) || existsSync(provenanceFile));
   setOutput('sarif-created', existsSync(sarifFile));
 } catch (error) {
   emitFailure(

@@ -16,6 +16,7 @@ public enum DependencySimulationVerificationStatus
 {
     Passed,
     Failed,
+    Incomplete,
     NotRun,
 }
 
@@ -40,6 +41,8 @@ public enum DependencySimulationRuntimeCompatibilityStatus
 public enum DependencySimulationEvidenceLevel
 {
     RestoreOnly,
+    BuildVerified,
+    TestVerified,
 }
 
 public enum DependencySimulationLockedMode
@@ -105,14 +108,20 @@ public sealed record DependencySimulationVerification(
     bool AuditedDeprecations,
     DependencySimulationLockedMode LockedMode)
 {
+    public VerificationLevel? RequestedLevel { get; init; }
+
+    public VerificationComparisonReport? Executed { get; init; }
+
     public static DependencySimulationVerification RestoreOnly(
         DependencySimulationVerificationStatus restore,
         bool auditedVulnerabilities,
         bool auditedDeprecations,
         DependencySimulationLockedMode lockedMode,
-        DependencySimulationRestoreFailureKind? restoreFailureKind = null) => new(
+        DependencySimulationRestoreFailureKind? restoreFailureKind = null,
+        VerificationLevel? requestedLevel = null) => new(
             restore,
-            restore == DependencySimulationVerificationStatus.Failed
+            restore is DependencySimulationVerificationStatus.Failed or
+                DependencySimulationVerificationStatus.Incomplete
                 ? restoreFailureKind ?? DependencySimulationRestoreFailureKind.Unknown
                 : null,
             DependencySimulationVerificationStatus.NotRun,
@@ -121,7 +130,10 @@ public sealed record DependencySimulationVerification(
             DependencySimulationEvidenceLevel.RestoreOnly,
             auditedVulnerabilities,
             auditedDeprecations,
-            lockedMode);
+            lockedMode)
+        {
+            RequestedLevel = requestedLevel,
+        };
 
 }
 
@@ -151,7 +163,7 @@ public sealed record DependencySimulationReport(
     IReadOnlyList<string> RejectionReasons,
     IReadOnlyList<string> Errors)
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 2;
 
     public string Kind => "dependencySimulation";
 
@@ -212,7 +224,12 @@ public static class DependencySimulationSerializer
             .Append(" | Tests: ").Append(Status(normalized.Verification.Tests))
             .Append(" | Runtime compatibility: ")
             .AppendLine(ToWords(normalized.Verification.RuntimeCompatibility.ToString()));
-        builder.Append("Evidence: restore only | Vulnerability audit: ")
+        builder.Append("Requested verification: ")
+            .AppendLine(normalized.Verification.RequestedLevel is { } requestedLevel
+                ? ToWords(requestedLevel.ToString())
+                : "not requested");
+        builder.Append("Evidence: ").Append(ToWords(normalized.Verification.EvidenceLevel.ToString()))
+            .Append(" | Vulnerability audit: ")
             .Append(normalized.Verification.AuditedVulnerabilities ? "included" : "not requested")
             .Append(" | Deprecation audit: ")
             .AppendLine(normalized.Verification.AuditedDeprecations ? "included" : "not requested");
@@ -252,8 +269,9 @@ public static class DependencySimulationSerializer
         }
 
         builder.Append("Verdict: ").AppendLine(Verdict(normalized.Verdict));
-        builder.AppendLine(
-            "Evidence is limited to dependency restore and graph analysis; build, tests, and runtime behavior were not verified.");
+        builder.AppendLine(normalized.Verification.Executed is null
+            ? "Evidence is limited to dependency restore and graph analysis; build, tests, and runtime behavior were not verified."
+            : "Evidence includes the explicitly requested restore/build/test stages; runtime behavior beyond those tests was not verified.");
         builder.AppendLine(
             "Restore and MSBuild may execute repository-controlled logic and contact configured NuGet feeds.");
         return builder.ToString();
@@ -275,7 +293,7 @@ public static class DependencySimulationSerializer
 
         if (!report.Repository.WorkingTreeRequiredClean)
         {
-            throw new InvalidDataException("Dependency simulation schema 1 requires a clean Git working tree.");
+            throw new InvalidDataException("Dependency simulation schema 2 requires a clean Git working tree.");
         }
 
         if (string.IsNullOrWhiteSpace(report.ToolVersion) ||
@@ -311,19 +329,59 @@ public static class DependencySimulationSerializer
         ValidateSha256(report.Mutation.SourceSha256Before);
         ValidateSha256(report.Mutation.SourceSha256After);
 
-        if (report.Verification.EvidenceLevel != DependencySimulationEvidenceLevel.RestoreOnly ||
-            report.Verification.Build != DependencySimulationVerificationStatus.NotRun ||
-            report.Verification.Tests != DependencySimulationVerificationStatus.NotRun ||
-            report.Verification.RuntimeCompatibility != DependencySimulationRuntimeCompatibilityStatus.NotVerified)
+        if (report.Verification.RuntimeCompatibility != DependencySimulationRuntimeCompatibilityStatus.NotVerified)
         {
             throw new InvalidDataException(
-                "Dependency Time Machine 0.5 can report only restore evidence with build, tests, and runtime compatibility unverified.");
+                "Dependency Time Machine does not claim runtime compatibility.");
         }
 
-        if (report.Verification.Restore != DependencySimulationVerificationStatus.Failed &&
-            report.Verification.RestoreFailureKind is not null ||
-            report.Verification.Restore == DependencySimulationVerificationStatus.Failed &&
-            report.Verification.RestoreFailureKind is null)
+        if (report.Verification.Executed is null &&
+            (report.Verification.EvidenceLevel != DependencySimulationEvidenceLevel.RestoreOnly ||
+             report.Verification.Build != DependencySimulationVerificationStatus.NotRun ||
+             report.Verification.Tests != DependencySimulationVerificationStatus.NotRun))
+        {
+            throw new InvalidDataException(
+                "Build or test evidence requires a structured verification comparison.");
+        }
+
+        if (report.Verification.Executed is { } executed)
+        {
+            if (report.Verification.RequestedLevel != executed.Level)
+            {
+                throw new InvalidDataException(
+                    "The simulation requested verification level disagrees with its structured evidence.");
+            }
+
+            var expectedBuild = MapStatus(executed.Candidate.Build.Stage);
+            var expectedTests = MapStatus(executed.Candidate.Tests.Stage);
+            var expectedLevel = executed.Decision.CommonEvidenceLevel switch
+            {
+                VerificationEvidenceLevel.TestVerified => DependencySimulationEvidenceLevel.TestVerified,
+                VerificationEvidenceLevel.BuildVerified => DependencySimulationEvidenceLevel.BuildVerified,
+                _ => DependencySimulationEvidenceLevel.RestoreOnly,
+            };
+            if (report.Verification.Build != expectedBuild ||
+                report.Verification.Tests != expectedTests ||
+                report.Verification.EvidenceLevel != expectedLevel)
+            {
+                throw new InvalidDataException(
+                    "The simulation verification summary disagrees with its structured evidence.");
+            }
+
+            if (executed.Decision.Verdict == VerificationVerdict.Incomplete &&
+                report.Verdict != DependencySimulationVerdict.Incomplete ||
+                executed.Decision.Verdict == VerificationVerdict.Reject &&
+                report.Verdict != DependencySimulationVerdict.Reject)
+            {
+                throw new InvalidDataException(
+                    "The simulation verdict disagrees with the requested verification result.");
+            }
+        }
+
+        var restoreHasFailure = report.Verification.Restore is
+            DependencySimulationVerificationStatus.Failed or
+            DependencySimulationVerificationStatus.Incomplete;
+        if (restoreHasFailure != (report.Verification.RestoreFailureKind is not null))
         {
             throw new InvalidDataException("The restore status and restore failure kind disagree.");
         }
@@ -430,9 +488,20 @@ public static class DependencySimulationSerializer
     {
         DependencySimulationVerificationStatus.Passed => "passed",
         DependencySimulationVerificationStatus.Failed => "failed",
+        DependencySimulationVerificationStatus.Incomplete => "incomplete",
         DependencySimulationVerificationStatus.NotRun => "not run",
         _ => throw new ArgumentOutOfRangeException(nameof(status)),
     };
+
+    private static DependencySimulationVerificationStatus MapStatus(
+        VerificationStageEvidence evidence) => evidence.Status switch
+        {
+            VerificationStageStatus.Passed => DependencySimulationVerificationStatus.Passed,
+            VerificationStageStatus.Failed => DependencySimulationVerificationStatus.Failed,
+            VerificationStageStatus.Incomplete => DependencySimulationVerificationStatus.Incomplete,
+            VerificationStageStatus.NotRequested => DependencySimulationVerificationStatus.NotRun,
+            _ => throw new InvalidDataException("The structured verification contains an unknown stage status."),
+        };
 
     private static string Verdict(DependencySimulationVerdict verdict) => verdict switch
     {

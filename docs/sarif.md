@@ -1,6 +1,6 @@
 # SARIF output
 
-PackageMedic 0.5 can serialize every PM001–PM008 finding as deterministic SARIF 2.1.0 for code-scanning systems.
+PackageMedic 0.6 can serialize every PM001–PM008 finding as deterministic SARIF 2.1.0 for code-scanning systems.
 
 ```console
 package-medic doctor . --format sarif

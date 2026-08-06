@@ -117,7 +117,7 @@ public sealed record AnalysisDiffReport(
     AnalysisDiffSummary Summary,
     IReadOnlyList<DiagnosticChange> Changes)
 {
-    public const int CurrentSchemaVersion = 2;
+    public const int CurrentSchemaVersion = 3;
 
     public IReadOnlyList<PackageChange> PackageChanges { get; init; } = [];
 
@@ -134,6 +134,8 @@ public sealed record AnalysisDiffReport(
     public IReadOnlyList<string> BaselineAnalysisErrors { get; init; } = [];
 
     public IReadOnlyList<string> CurrentAnalysisErrors { get; init; } = [];
+
+    public VerificationComparisonReport? Verification { get; init; }
 }
 
 /// <summary>
@@ -762,6 +764,35 @@ public static class AnalysisDiffSerializer
                 .AppendLine();
         }
 
+        if (report.Verification is { } verification)
+        {
+            builder.Append("Verification: ")
+                .Append(ToVerificationText(verification.Decision.Verdict))
+                .Append(" | Requested: ")
+                .Append(ToVerificationText(verification.Level))
+                .Append(" | Common evidence: ")
+                .Append(ToVerificationText(verification.Decision.CommonEvidenceLevel))
+                .AppendLine();
+            AppendVerificationSnapshot(builder, "Baseline", verification.Baseline);
+            AppendVerificationSnapshot(builder, "Candidate", verification.Candidate);
+            if (verification.Decision.BlockingSnapshot is { } blockingSnapshot)
+            {
+                builder.Append("Verification blocked by ")
+                    .Append(ToVerificationText(blockingSnapshot));
+                if (verification.Decision.BlockingStage is { } blockingStage)
+                {
+                    builder.Append(' ').Append(ToVerificationText(blockingStage));
+                }
+
+                if (verification.Decision.FailureKind is { } failureKind)
+                {
+                    builder.Append(" (").Append(ToVerificationText(failureKind)).Append(')');
+                }
+
+                builder.AppendLine();
+            }
+        }
+
         if (!report.IsComplete)
         {
             builder.AppendLine("Comparison incomplete: no graph changes were calculated because an analysis failed.");
@@ -872,6 +903,43 @@ public static class AnalysisDiffSerializer
 
                 builder.AppendLine();
             }
+        }
+
+        return builder.ToString();
+    }
+
+    private static void AppendVerificationSnapshot(
+        StringBuilder builder,
+        string label,
+        VerificationSnapshotReport snapshot)
+    {
+        builder.Append(label)
+            .Append(" stages: restore ").Append(ToVerificationText(snapshot.Restore.Status))
+            .Append(" | build ").Append(ToVerificationText(snapshot.Build.Stage.Status))
+            .Append(" | tests ").Append(ToVerificationText(snapshot.Tests.Stage.Status));
+        if (snapshot.Tests.Stage.Status != VerificationStageStatus.NotRequested)
+        {
+            builder.Append(" (")
+                .Append(snapshot.Tests.Passed).Append(" passed, ")
+                .Append(snapshot.Tests.Failed).Append(" failed, ")
+                .Append(snapshot.Tests.Skipped).Append(" skipped)");
+        }
+
+        builder.AppendLine();
+    }
+
+    private static string ToVerificationText<T>(T value) where T : struct, Enum
+    {
+        var text = value.ToString();
+        var builder = new StringBuilder(text.Length + 8);
+        for (var index = 0; index < text.Length; index++)
+        {
+            if (index > 0 && char.IsUpper(text[index]))
+            {
+                builder.Append(' ');
+            }
+
+            builder.Append(char.ToLowerInvariant(text[index]));
         }
 
         return builder.ToString();

@@ -10,6 +10,7 @@ import {
   escapeCommandProperty,
   escapeMarkdown,
   isolatedName,
+  isVerifiedRestoreRejection,
   normalizeActionInstance,
   parseAnnotationMode,
   parseBoolean,
@@ -46,6 +47,24 @@ test('validates optional Git references without restricting useful revision synt
   assert.throws(() => validateGitReference('a'.repeat(513)));
 });
 
+test('recognizes only candidate restore rejection as a complete verified result without an SBOM', () => {
+  const report = {
+    diff: {
+      verification: {
+        decision: { verdict: 'reject', blockingSnapshot: 'candidate', blockingStage: 'restore' },
+      },
+    },
+  };
+
+  assert.equal(isVerifiedRestoreRejection(report), true);
+  assert.equal(isVerifiedRestoreRejection({
+    diff: { verification: { decision: { ...report.diff.verification.decision, blockingStage: 'build' } } },
+  }), false);
+  assert.equal(isVerifiedRestoreRejection({
+    diff: { verification: { decision: { ...report.diff.verification.decision, verdict: 'incomplete' } } },
+  }), false);
+});
+
 test('selects pull request diff mode without inventing or fetching Git references', () => {
   assert.deepEqual(resolveAnalysisMode('auto', '', 'pull_request', 'abc123'), {
     mode: 'diff', diffBase: 'abc123', automatic: true,
@@ -60,6 +79,12 @@ test('selects pull request diff mode without inventing or fetching Git reference
   assert.throws(() => resolveAnalysisMode('auto', '', 'pull_request', ''), /could not resolve/u);
   assert.throws(
     () => resolveAnalysisMode('auto', '', 'pull_request_target', 'abc123'),
+    /does not analyze pull_request_target/u);
+  assert.throws(
+    () => resolveAnalysisMode('scan', '', 'pull_request_target', 'abc123'),
+    /does not analyze pull_request_target/u);
+  assert.throws(
+    () => resolveAnalysisMode('diff', 'origin/main', 'pull_request_target', 'abc123'),
     /does not analyze pull_request_target/u);
 });
 
@@ -289,6 +314,7 @@ test('summarizes structured Git graph changes', () => {
     complete: true,
     baselineAnalysisErrors: 0,
     currentAnalysisErrors: 0,
+    verification: undefined,
     impact: {
       gatePassed: false,
       violations: 1,
@@ -309,6 +335,77 @@ test('summarizes structured Git graph changes', () => {
   assert.match(summary, /Root\.Package@1\.0\.0 → Example\.Package@2\.0\.0/);
   assert.doesNotMatch(summary, /<img>/);
   assert.match(summary, /\\<img\\>/);
+});
+
+test('summarizes comparative build and test verification evidence', () => {
+  const report = {
+    target: '.',
+    summary: { projects: 1 },
+    diagnostics: [],
+    analysisErrors: [],
+    diff: {
+      isComplete: true,
+      summary: { added: 0, resolved: 0, severityChanged: 0 },
+      packageChanges: [],
+      projectSettingsChanges: [],
+      verification: {
+        level: 'test',
+        baseline: {
+          build: { stage: { status: 'passed' } },
+          tests: { stage: { status: 'passed' }, passed: 10, failed: 0, skipped: 1 },
+        },
+        candidate: {
+          build: { stage: { status: 'passed' } },
+          tests: { stage: { status: 'failed' }, passed: 8, failed: 2, skipped: 1 },
+        },
+        decision: {
+          verdict: 'reject',
+          blockingSnapshot: 'candidate',
+          blockingStage: 'test',
+        },
+      },
+    },
+  };
+
+  const details = reportDetails(report);
+  assert.deepEqual(details.diff.verification, {
+    level: 'test',
+    status: 'reject',
+    buildRegression: false,
+    testRegression: true,
+    testsPassed: 8,
+    testsFailed: 2,
+    testsSkipped: 1,
+    incomplete: false,
+    baselineBuild: 'passed',
+    candidateBuild: 'passed',
+    baselineTests: 'passed',
+    candidateTests: 'failed',
+  });
+  const summary = renderSummary(report, details, 1);
+  assert.match(summary, /### Verification: reject/u);
+  assert.match(summary, /\| test \| passed \| passed \| passed \| failed \|/u);
+  assert.match(summary, /\| 8 \| 2 \| 1 \|/u);
+});
+
+test('marks operational verification evidence as incomplete', () => {
+  const report = {
+    diagnostics: [],
+    diff: {
+      summary: {},
+      verification: {
+        level: 'build',
+        baseline: { build: { stage: { status: 'passed' } }, tests: { stage: {} } },
+        candidate: { build: { stage: { status: 'incomplete' } }, tests: { stage: {} } },
+        decision: { verdict: 'incomplete', blockingSnapshot: 'candidate', blockingStage: 'build' },
+      },
+    },
+  };
+
+  const details = reportDetails(report);
+  assert.equal(details.diff.verification.incomplete, true);
+  assert.equal(details.diff.verification.buildRegression, false);
+  assert.match(renderSummary(report, details, 2), /Verification incomplete/u);
 });
 
 test('marks incomplete Git comparisons in the job summary', () => {

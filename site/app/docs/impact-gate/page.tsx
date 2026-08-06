@@ -126,7 +126,7 @@ package-medic diff origin/main . --audit --deprecated --include-transitive`}</Co
   with:
     fetch-depth: 0
 
-- uses: GonzMeza/package-medic@v0.5.0
+- uses: GonzMeza/package-medic@v0.6.0
   with:
     mode: auto
     config: .packagemedic.json

@@ -10,12 +10,25 @@ public enum RestoreProcessFailureKind
     OutputLimitExceeded,
 }
 
+public enum RestoreRejectionEvidenceKind
+{
+    Unknown,
+    AuthenticationFailed,
+    SourceUnavailable,
+    LockFileConflict,
+    PackageNotFound,
+    VersionNotFound,
+    DependencyConflict,
+}
+
 public sealed record RestoreExecutionResult(
     IReadOnlyList<Diagnostic> Diagnostics,
     IReadOnlyList<string> Errors,
     RestoreProcessFailureKind FailureKind)
 {
     public bool Succeeded => FailureKind == RestoreProcessFailureKind.None && Errors.Count == 0;
+
+    public IReadOnlyList<RestoreRejectionEvidenceKind> RejectedTargets { get; init; } = [];
 }
 
 public sealed partial class RestoreRunner
@@ -61,14 +74,16 @@ public sealed partial class RestoreRunner
         Action<string>? progress,
         CancellationToken cancellationToken,
         bool forceEvaluate = false,
-        string? packagesDirectory = null)
+        string? packagesDirectory = null,
+        string? configuration = null)
     {
         var result = await RestoreDetailedAsync(
             discovery,
             progress,
             cancellationToken,
             forceEvaluate,
-            packagesDirectory).ConfigureAwait(false);
+            packagesDirectory,
+            configuration).ConfigureAwait(false);
         return (result.Diagnostics, result.Errors);
     }
 
@@ -77,12 +92,15 @@ public sealed partial class RestoreRunner
         Action<string>? progress,
         CancellationToken cancellationToken,
         bool forceEvaluate = false,
-        string? packagesDirectory = null)
+        string? packagesDirectory = null,
+        string? configuration = null)
     {
         if (packagesDirectory is not null && !Path.IsPathFullyQualified(packagesDirectory))
         {
             throw new ArgumentException("The isolated packages directory must be absolute.", nameof(packagesDirectory));
         }
+
+        ValidateConfiguration(configuration);
 
         var progressGate = new object();
         var targets = discovery.RestoreTargets
@@ -98,7 +116,13 @@ public sealed partial class RestoreRunner
         return new RestoreExecutionResult(
             Deduplicate(outcomes.SelectMany(item => item!.Diagnostics)),
             outcomes.SelectMany(item => item!.Errors).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
-            AggregateFailure(outcomes.Select(item => item!.FailureKind)));
+            AggregateFailure(outcomes.Select(item => item!.FailureKind)))
+        {
+            RejectedTargets = outcomes
+                .Where(item => item!.FailureKind == RestoreProcessFailureKind.Rejected)
+                .Select(item => item!.RejectionEvidence)
+                .ToArray(),
+        };
 
         async Task RestoreBatchAsync(IReadOnlyList<int> batch, int maximumParallelism)
         {
@@ -117,7 +141,8 @@ public sealed partial class RestoreRunner
                         progressGate,
                         token,
                         forceEvaluate,
-                        packagesDirectory).ConfigureAwait(false);
+                        packagesDirectory,
+                        configuration).ConfigureAwait(false);
                 }).ConfigureAwait(false);
         }
     }
@@ -126,13 +151,29 @@ public sealed partial class RestoreRunner
         Path.GetExtension(path).Equals(".sln", StringComparison.OrdinalIgnoreCase) ||
         Path.GetExtension(path).Equals(".slnx", StringComparison.OrdinalIgnoreCase);
 
+    private static void ValidateConfiguration(string? configuration)
+    {
+        if (configuration is null)
+        {
+            return;
+        }
+
+        if (configuration.Length is < 1 or > 64 ||
+            configuration.Any(character =>
+                !char.IsAsciiLetterOrDigit(character) && character is not '.' and not '_' and not '-'))
+        {
+            throw new ArgumentException("The restore configuration is invalid.", nameof(configuration));
+        }
+    }
+
     private async Task<RestoreTargetOutcome> RestoreTargetAsync(
         string target,
         Action<string>? progress,
         object progressGate,
         CancellationToken cancellationToken,
         bool forceEvaluate,
-        string? packagesDirectory)
+        string? packagesDirectory,
+        string? configuration)
     {
         lock (progressGate)
         {
@@ -164,6 +205,11 @@ public sealed partial class RestoreRunner
                 arguments.Add(packagesDirectory);
             }
 
+            if (configuration is not null)
+            {
+                arguments.Add($"--property:Configuration={configuration}");
+            }
+
             result = await processRunner.RunAsync(
                 "dotnet",
                 arguments,
@@ -175,7 +221,8 @@ public sealed partial class RestoreRunner
             return new RestoreTargetOutcome(
                 [],
                 [$"dotnet restore timed out for '{target}' after {timeout.TotalSeconds:0} seconds."],
-                RestoreProcessFailureKind.TimedOut);
+                RestoreProcessFailureKind.TimedOut,
+                RestoreRejectionEvidenceKind.Unknown);
         }
 
         var errors = new List<string>();
@@ -198,13 +245,69 @@ public sealed partial class RestoreRunner
             : result.ExitCode == 0
                 ? RestoreProcessFailureKind.None
                 : RestoreProcessFailureKind.Rejected;
-        return new RestoreTargetOutcome(ParseNuGetDiagnostics(result.CombinedOutput, target), errors, failureKind);
+        return new RestoreTargetOutcome(
+            ParseNuGetDiagnostics(result.CombinedOutput, target),
+            errors,
+            failureKind,
+            failureKind == RestoreProcessFailureKind.Rejected
+                ? ClassifyRejectedOutput(result.CombinedOutput)
+                : RestoreRejectionEvidenceKind.Unknown);
     }
 
     private sealed record RestoreTargetOutcome(
         IReadOnlyList<Diagnostic> Diagnostics,
         IReadOnlyList<string> Errors,
-        RestoreProcessFailureKind FailureKind);
+        RestoreProcessFailureKind FailureKind,
+        RestoreRejectionEvidenceKind RejectionEvidence);
+
+    private static RestoreRejectionEvidenceKind ClassifyRejectedOutput(string output)
+    {
+        var candidates = new HashSet<RestoreRejectionEvidenceKind>();
+        if (output.Contains("401 Unauthorized", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("403 Forbidden", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("unauthorized", StringComparison.OrdinalIgnoreCase) ||
+            output.Contains("forbidden", StringComparison.OrdinalIgnoreCase))
+        {
+            candidates.Add(RestoreRejectionEvidenceKind.AuthenticationFailed);
+        }
+
+        foreach (Match match in RestoreErrorLineRegex().Matches(output))
+        {
+            if (!match.Groups["code"].Success)
+            {
+                if (match.Value.Contains("401 Unauthorized", StringComparison.OrdinalIgnoreCase) ||
+                    match.Value.Contains("403 Forbidden", StringComparison.OrdinalIgnoreCase) ||
+                    match.Value.Contains("unauthorized", StringComparison.OrdinalIgnoreCase) ||
+                    match.Value.Contains("forbidden", StringComparison.OrdinalIgnoreCase))
+                {
+                    candidates.Add(RestoreRejectionEvidenceKind.AuthenticationFailed);
+                    continue;
+                }
+
+                return RestoreRejectionEvidenceKind.Unknown;
+            }
+
+            var evidence = match.Groups["code"].Value.ToUpperInvariant() switch
+            {
+                "NU1300" or "NU1301" => RestoreRejectionEvidenceKind.SourceUnavailable,
+                "NU1004" or "NU1005" => RestoreRejectionEvidenceKind.LockFileConflict,
+                "NU1101" => RestoreRejectionEvidenceKind.PackageNotFound,
+                "NU1102" => RestoreRejectionEvidenceKind.VersionNotFound,
+                "NU1106" or "NU1107" or "NU1605" => RestoreRejectionEvidenceKind.DependencyConflict,
+                _ => RestoreRejectionEvidenceKind.Unknown,
+            };
+            if (evidence == RestoreRejectionEvidenceKind.Unknown)
+            {
+                return RestoreRejectionEvidenceKind.Unknown;
+            }
+
+            candidates.Add(evidence);
+        }
+
+        return candidates.Count == 1
+            ? candidates.Single()
+            : RestoreRejectionEvidenceKind.Unknown;
+    }
 
     private static RestoreProcessFailureKind AggregateFailure(IEnumerable<RestoreProcessFailureKind> failures)
     {
@@ -278,4 +381,7 @@ public sealed partial class RestoreRunner
 
     [GeneratedRegex("(?:(?<file>.+?)\\s*:\\s*)?(?<level>warning|error)\\s+(?<code>NU\\d{4})\\s*:\\s*(?<message>.+?)(?:\\s+\\[[^]]+\\])?$", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
     private static partial Regex NuGetDiagnosticRegex();
+
+    [GeneratedRegex("\\berror(?:\\s+(?<code>[A-Z]{2,}\\d{4}))?\\s*:[^\\r\\n]*", RegexOptions.IgnoreCase | RegexOptions.NonBacktracking)]
+    private static partial Regex RestoreErrorLineRegex();
 }

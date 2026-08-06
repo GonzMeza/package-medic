@@ -390,7 +390,7 @@ public sealed class InfrastructureTests
             var package = Assert.Single(result.PackageInventory);
             Assert.Null(package.PackageSource);
             Assert.Null(package.ContentHash);
-            Assert.False(package.SignaturePresent);
+            Assert.Null(package.SignaturePresent);
         }
         finally
         {
@@ -985,6 +985,43 @@ public sealed class InfrastructureTests
     }
 
     [Fact]
+    public async Task RestoreUsesTheRequestedVerificationConfiguration()
+    {
+        var target = Path.Combine(Path.GetTempPath(), "PackageMedic.RestoreConfiguration", "App.csproj");
+        var runner = new ArgumentRecordingProcessRunner();
+
+        var result = await new RestoreRunner(runner).RestoreDetailedAsync(
+            new DiscoveryResult(target, [], [target], [target]),
+            null,
+            TestContext.Current.CancellationToken,
+            configuration: "Release");
+
+        Assert.True(result.Succeeded);
+        var arguments = Assert.Single(runner.Calls);
+        Assert.Contains("--property:Configuration=Release", arguments);
+    }
+
+    [Theory]
+    [InlineData("error MSB4018: repository target failed")]
+    [InlineData("error : repository target failed without a diagnostic code")]
+    public async Task RestoreClassificationUsesFullBoundedOutputFromBothStreams(string secondFailure)
+    {
+        var target = Path.Combine(Path.GetTempPath(), "PackageMedic.RestoreEvidence", "App.csproj");
+        var runner = new DelayedProcessRunner(_ => new ProcessResult(
+            1,
+            "error NU1102: requested version was not found",
+            new string('x', 750) + " " + secondFailure));
+
+        var result = await new RestoreRunner(runner).RestoreDetailedAsync(
+            new DiscoveryResult(target, [], [target], [target]),
+            null,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(RestoreProcessFailureKind.Rejected, result.FailureKind);
+        Assert.Equal([RestoreRejectionEvidenceKind.Unknown], result.RejectedTargets);
+    }
+
+    [Fact]
     public void AnalysisExecutionTimeoutsRejectUnsafeValues()
     {
         var options = new AnalysisExecutionOptions(TimeSpan.Zero, TimeSpan.FromMinutes(1));
@@ -1180,6 +1217,21 @@ public sealed class InfrastructureTests
             {
                 Interlocked.Decrement(ref active);
             }
+        }
+    }
+
+    private sealed class ArgumentRecordingProcessRunner : IProcessRunner
+    {
+        public List<IReadOnlyList<string>> Calls { get; } = [];
+
+        public Task<ProcessResult> RunAsync(
+            string fileName,
+            IReadOnlyList<string> arguments,
+            string workingDirectory,
+            CancellationToken cancellationToken)
+        {
+            Calls.Add(arguments.ToArray());
+            return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty));
         }
     }
 

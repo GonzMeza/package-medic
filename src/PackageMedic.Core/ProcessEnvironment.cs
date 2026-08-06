@@ -180,6 +180,7 @@ public sealed class ProcessEnvironment
         variables["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1";
         variables["DOTNET_NOLOGO"] = "1";
         variables["MSBUILDDISABLENODEREUSE"] = "1";
+        variables["DOTNET_CLI_USE_MSBUILD_SERVER"] = "0";
         variables["NUGET_XMLDOC_MODE"] = "skip";
 
         if (additionalVariables is not null)

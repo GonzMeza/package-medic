@@ -16,6 +16,7 @@ public enum CliCommand
     Explain,
     Clean,
     Simulate,
+    Sbom,
 }
 
 public enum OutputFormat
@@ -59,7 +60,13 @@ public sealed record CliOptions(
     bool IncludeTransitiveDeprecatedPackages = false,
     string? SimulationPackageId = null,
     string? SimulationTargetVersion = null,
-    IReadOnlyList<string>? SimulationCredentialEnvironmentVariables = null)
+    IReadOnlyList<string>? SimulationCredentialEnvironmentVariables = null,
+    string? SbomOutputPath = null,
+    VerificationLevel? Verify = null,
+    int? BuildTimeoutSeconds = null,
+    int? TestTimeoutSeconds = null,
+    string VerificationConfiguration = "Release",
+    string? ProvenanceOutputPath = null)
 {
     public static CliOptions Parse(IReadOnlyList<string> arguments)
     {
@@ -79,6 +86,7 @@ public sealed record CliOptions(
             "audit" => ParseScan(arguments, 1, CliCommand.Audit),
             "diff" => ParseDiff(arguments),
             "simulate" => ParseSimulate(arguments),
+            "sbom" => ParseSbom(arguments),
             "clean" => ParseScan(arguments, 1, CliCommand.Clean),
             "init" => ParseInit(arguments),
             "baseline" => ParseBaseline(arguments),
@@ -171,6 +179,31 @@ public sealed record CliOptions(
         return ParseScan(arguments, 2, CliCommand.Diff) with { GitReference = reference };
     }
 
+    private static CliOptions ParseSbom(IReadOnlyList<string> arguments)
+    {
+        var parsed = ParseScan(arguments, 1, CliCommand.Sbom);
+        if (parsed.ShowHelp)
+        {
+            return parsed;
+        }
+
+        if (parsed.OutputPath is null)
+        {
+            throw new UsageException("'sbom' requires --output <path>.");
+        }
+
+        if (parsed.Format != OutputFormat.Text)
+        {
+            throw new UsageException("'sbom' always writes CycloneDX JSON and does not accept --format.");
+        }
+
+        return parsed with
+        {
+            OutputPath = null,
+            SbomOutputPath = parsed.OutputPath,
+        };
+    }
+
     private static CliOptions ParseInit(IReadOnlyList<string> arguments)
     {
         string? path = null;
@@ -246,6 +279,14 @@ public sealed record CliOptions(
         var verbosity = OutputVerbosity.Normal;
         string? output = null;
         string? sarifOutput = null;
+        string? sbomOutput = null;
+        string? provenanceOutput = null;
+        VerificationLevel? verify = null;
+        var verifySpecified = false;
+        int? buildTimeout = null;
+        int? testTimeout = null;
+        var verificationConfiguration = "Release";
+        var verificationConfigurationSpecified = false;
         string? config = null;
         var noConfig = false;
         string? baseline = null;
@@ -291,6 +332,29 @@ public sealed record CliOptions(
                 output = NonEmpty(value, "--output");
             else if (TryReadOption(arguments, ref index, "--sarif-output", out value))
                 sarifOutput = NonEmpty(value, "--sarif-output");
+            else if (TryReadOption(arguments, ref index, "--sbom-output", out value))
+                sbomOutput = NonEmpty(value, "--sbom-output");
+            else if (TryReadOption(arguments, ref index, "--provenance-output", out value))
+                provenanceOutput = NonEmpty(value, "--provenance-output");
+            else if (TryReadOption(arguments, ref index, "--verify", out value))
+            {
+                if (verifySpecified)
+                {
+                    throw new UsageException("--verify can only be specified once.");
+                }
+
+                verifySpecified = true;
+                verify = ParseEnum<VerificationLevel>(value, "--verify", "restore|build|test");
+            }
+            else if (TryReadOption(arguments, ref index, "--build-timeout", out value))
+                buildTimeout = PositiveInt(value, "--build-timeout");
+            else if (TryReadOption(arguments, ref index, "--test-timeout", out value))
+                testTimeout = PositiveInt(value, "--test-timeout");
+            else if (TryReadOption(arguments, ref index, "--verification-configuration", out value))
+            {
+                verificationConfigurationSpecified = true;
+                verificationConfiguration = VerificationConfigurationName(value);
+            }
             else if (TryReadOption(arguments, ref index, "--fail-on", out value))
                 failOn = ParseEnum<PolicyFailureLevel>(value, "--fail-on", "none|warning|error");
             else if (TryReadOption(arguments, ref index, "--fail-on-new", out value))
@@ -333,6 +397,16 @@ public sealed record CliOptions(
             throw new UsageException("--sarif-output is only supported by 'doctor', 'audit', and 'diff'.");
         }
 
+        if (command is not (CliCommand.Doctor or CliCommand.Audit or CliCommand.Diff) && sbomOutput is not null)
+        {
+            throw new UsageException("--sbom-output is only supported by 'doctor', 'audit', and 'diff'.");
+        }
+
+        if (provenanceOutput is not null && command != CliCommand.Diff)
+        {
+            throw new UsageException("--provenance-output is only supported by verified 'diff'.");
+        }
+
         if (command == CliCommand.Clean && (output is not null || format != OutputFormat.Text))
         {
             throw new UsageException("'clean --dry-run' writes its plan to standard output and does not accept --output or --format.");
@@ -361,7 +435,7 @@ public sealed record CliOptions(
         }
 
         if ((auditVulnerabilities || auditDeprecatedPackages) &&
-            command is not (CliCommand.Doctor or CliCommand.Audit or CliCommand.Diff or CliCommand.Simulate))
+            command is not (CliCommand.Doctor or CliCommand.Audit or CliCommand.Diff or CliCommand.Simulate or CliCommand.Sbom))
         {
             throw new UsageException("Package audit options are only supported by 'doctor', 'audit', and 'diff'.");
         }
@@ -394,6 +468,37 @@ public sealed record CliOptions(
             }
         }
 
+        if (verify is not null && command is not (CliCommand.Diff or CliCommand.Simulate))
+        {
+            throw new UsageException("--verify is only supported by 'diff' and 'simulate'.");
+        }
+
+        if (verify is not null && noRestore)
+        {
+            throw new UsageException("--verify requires independent restores and cannot be combined with --no-restore.");
+        }
+
+        if (verify is null &&
+            (buildTimeout is not null || testTimeout is not null || verificationConfigurationSpecified))
+        {
+            throw new UsageException(
+                "--build-timeout, --test-timeout, and --verification-configuration require --verify.");
+        }
+        if (provenanceOutput is not null && verify is null)
+        {
+            throw new UsageException("--provenance-output requires 'diff --verify' over immutable committed snapshots.");
+        }
+
+        if (verify == VerificationLevel.Restore && (buildTimeout is not null || testTimeout is not null))
+        {
+            throw new UsageException("Restore-only verification does not accept build or test timeouts.");
+        }
+
+        if (verify == VerificationLevel.Build && testTimeout is not null)
+        {
+            throw new UsageException("--test-timeout requires '--verify test'.");
+        }
+
         return new CliOptions(
             command, path, noRestore, format, failOn, failOnNew, verbosity, output, sarifOutput,
             config, noConfig, baseline, restoreTimeout, evaluationTimeout, force, dryRun,
@@ -402,7 +507,13 @@ public sealed record CliOptions(
             ShowHelp: help,
             MaxParallelism: maxParallelism,
             AuditDeprecatedPackages: auditDeprecatedPackages,
-            IncludeTransitiveDeprecatedPackages: includeTransitiveDeprecatedPackages);
+            IncludeTransitiveDeprecatedPackages: includeTransitiveDeprecatedPackages,
+            SbomOutputPath: sbomOutput,
+            Verify: verify,
+            BuildTimeoutSeconds: buildTimeout,
+            TestTimeoutSeconds: testTimeout,
+            VerificationConfiguration: verificationConfiguration,
+            ProvenanceOutputPath: provenanceOutput);
     }
 
     private static bool TryReadOption(IReadOnlyList<string> arguments, ref int index, string name, out string value)
@@ -437,6 +548,20 @@ public sealed record CliOptions(
 
     private static string NonEmpty(string value, string option) =>
         !string.IsNullOrWhiteSpace(value) ? value : throw new UsageException($"Option '{option}' requires a non-empty path.");
+
+    private static string VerificationConfigurationName(string value)
+    {
+        var configuration = NonEmpty(value, "--verification-configuration");
+        if (configuration.Length > 64 ||
+            configuration.Any(character =>
+                !char.IsAsciiLetterOrDigit(character) && character is not '.' and not '_' and not '-'))
+        {
+            throw new UsageException(
+                "--verification-configuration must use 1-64 ASCII letters, digits, dots, underscores, or hyphens.");
+        }
+
+        return configuration;
+    }
 
     private static int PositiveInt(string value, string option) =>
         int.TryParse(value, out var parsed) && parsed is >= 1 and <= 3600

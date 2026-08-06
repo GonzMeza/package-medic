@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using PackageMedic.Core;
 
 namespace PackageMedic.Core.Tests;
@@ -222,6 +224,27 @@ public sealed class PackageMedicConfigurationTests
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void LoadsAndFingerprintsTheExactConfigurationBytesOnce()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"packagemedic-config-{Guid.NewGuid():N}.json");
+        const string json = "{\"schemaVersion\":1,\"failOn\":\"error\"}";
+        try
+        {
+            File.WriteAllText(path, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+
+            var loaded = PackageMedicConfigurationLoader.LoadWithSha256(path);
+            var expected = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant();
+
+            Assert.Equal(PolicyFailureLevel.Error, loaded.Configuration.FailOn);
+            Assert.Equal(expected, loaded.Sha256);
+        }
+        finally
+        {
+            File.Delete(path);
         }
     }
 
